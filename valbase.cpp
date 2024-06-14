@@ -59,6 +59,14 @@ CBaseInstruction::CBaseInstruction(CBaseInstruction* pPrevInst)
 }
 
 //-----------------------------------------------------------------------------
+// CBaseInstruction::~CBaseInstruction
+//-----------------------------------------------------------------------------
+CBaseInstruction::~CBaseInstruction()
+{
+    
+}
+
+//-----------------------------------------------------------------------------
 // CBaseInstruction::SetSpewFileNameAndLineNumber
 //-----------------------------------------------------------------------------
 void CBaseInstruction::SetSpewFileNameAndLineNumber(const char* pFileName, const DWORD* pLineNumber)
@@ -468,7 +476,7 @@ void CBaseShaderValidator::Spew(    SPEW_TYPE SpewType,
                                     CBaseInstruction* pInst /* can be NULL */, 
                                     const char* pszFormat, ... )
 {
-    int Length = 128;
+    int Length = 256;
     char* pBuffer = NULL;
     va_list marker;
 

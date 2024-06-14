@@ -10,7 +10,6 @@
 #ifdef __clang__
 #pragma clang diagnostic ignored "-Wcomma"
 #pragma clang diagnostic ignored "-Wconditional-uninitialized"
-#pragma clang diagnostic ignored "-Wdelete-abstract-non-virtual-dtor"
 #pragma clang diagnostic ignored "-Wdeprecated-declarations"
 #pragma clang diagnostic ignored "-Wextra-tokens"
 #pragma clang diagnostic ignored "-Wformat-security"

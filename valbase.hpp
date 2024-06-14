@@ -87,6 +87,8 @@ class CBaseInstruction
 {
 public:
     CBaseInstruction(CBaseInstruction* pPrevInst);  // Append to linked list
+    virtual ~CBaseInstruction();
+
     void SetSpewFileNameAndLineNumber(const char* pFileName, const DWORD* pLineNumber);
     char* MakeInstructionLocatorString();
     virtual void CalculateComponentReadMasks(DWORD dwVersion) = 0; // which components to each source read?
@@ -208,7 +210,7 @@ protected:
 
 public:
     CBaseShaderValidator( const DWORD* pCode, const D3DCAPS8* pCaps, DWORD Flags );
-    ~CBaseShaderValidator();
+    virtual ~CBaseShaderValidator();
 
     DWORD GetRequiredLogBufferSize()
     {

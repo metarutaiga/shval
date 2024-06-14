@@ -71,9 +71,9 @@ public:
 class CPShaderValidator10 : public CBasePShaderValidator
 {
 private:
-    UINT            m_TexOpCount;
-    UINT            m_BlendOpCount;
-    UINT            m_TotalOpCount; // not necessarily the sum of TexOpCount and BlendOpCount....
+//  UINT            m_TexOpCount;
+//  UINT            m_BlendOpCount;
+//  UINT            m_TotalOpCount; // not necessarily the sum of TexOpCount and BlendOpCount....
     UINT            m_TexMBaseDstReg;
 
     BOOL ApplyPerInstructionRules();

@@ -7,6 +7,7 @@
 //
 ///////////////////////////////////////////////////////////////////////////////
 #include "pch.cpp"
+#pragma hdrstop
 
 // Use these macros when looking at CPSInstruction derived members of the current instruction (CBaseInstruction)
 #define _CURR_PS_INST   ((CPSInstruction*)m_pCurrInst)
@@ -14,76 +15,114 @@
 
 //-----------------------------------------------------------------------------
 // CPSInstruction::CalculateComponentReadMasks()
+//
+// Figure out which components of each source parameter is read by a pixelshader
+// instruction.  For certain pixelshader instructions, the some components
+// are also read from the dest parameter.
+//
+// Note: When this function is changed, the changes need to be ported to
+// refrast's CalculateSourceReadMasks() function in rast\pshader.cpp
+// (Though that function does not care about channels read from the dest parameter
+//  like this one does).
 //-----------------------------------------------------------------------------
-void CPSInstruction::CalculateComponentReadMasks()
+void CPSInstruction::CalculateComponentReadMasks(DWORD dwVersion)
 {
-    BOOL bR, bG, bB, bA;
+    UINT i, j;
 
-    // The only instruction that has source registers but no destination register is the 
-    // XFC instruction.  If this is the XFC instruction, and the source swizzle is identity,
-    // assume the read mask is rgb for all sources except G which is b.
-    for( UINT i = 0; i < m_SrcParamCount; i++ )
+    switch( m_Type ) // instructions that actually read from the *Destination* register...
     {
-        bR=FALSE, bG=FALSE; bB=FALSE; bA=FALSE;
-        if(m_DstParam[0].m_bParamUsed)
+    case D3DSIO_TEXM3x2DEPTH:
+    case D3DSIO_TEXDEPTH:
+        m_DstParam.m_ComponentReadMask = D3DSP_WRITEMASK_0 | D3DSP_WRITEMASK_1;
+        break;
+    case D3DSIO_TEXKILL:
+        if( (D3DPS_VERSION(1,4) == dwVersion) && (D3DSPR_TEMP == m_DstParam.m_RegType) )
         {
-            // destination is used
-            if(m_DstParam[0].m_WriteMask & D3DSP_WRITEMASK_0) bR = TRUE;
-            if(m_DstParam[0].m_WriteMask & D3DSP_WRITEMASK_1) bG = TRUE;
-            if(m_DstParam[0].m_WriteMask & D3DSP_WRITEMASK_2) bB = TRUE;
-            if(m_DstParam[0].m_WriteMask & D3DSP_WRITEMASK_3) bA = TRUE;
+            // for ps.1.4, texkill on an r# register only reads rgb
+            m_DstParam.m_ComponentReadMask = D3DSP_WRITEMASK_0 | D3DSP_WRITEMASK_1 | D3DSP_WRITEMASK_2;
         }
         else
         {
-            // first six xfc instruction read .rgb by default, last one reads just .b
-            if(i <= 5)
-                bR = bG = bB = TRUE;
-            else
-                bB = TRUE;
+            m_DstParam.m_ComponentReadMask = D3DSP_WRITEMASK_0 | D3DSP_WRITEMASK_1 | D3DSP_WRITEMASK_2 | D3DSP_WRITEMASK_3;
         }
-        
-        // DP3 instruction does not read alpha
-        if(D3DSIO_DP3 == m_Type)
-            bA = FALSE;
+        break;
+    }
 
-        BOOL read[4] = {FALSE, FALSE, FALSE, FALSE};
-        if(bR)
-            read[(m_SrcParam[i].m_SwizzleShift >> (D3DSP_SWIZZLE_SHIFT + 0)) & 0x3] = TRUE;
-        if(bG)
-            read[(m_SrcParam[i].m_SwizzleShift >> (D3DSP_SWIZZLE_SHIFT + 2)) & 0x3] = TRUE;
-        if(bB)
-            read[(m_SrcParam[i].m_SwizzleShift >> (D3DSP_SWIZZLE_SHIFT + 4)) & 0x3] = TRUE;
-        if(bA)
-            read[(m_SrcParam[i].m_SwizzleShift >> (D3DSP_SWIZZLE_SHIFT + 6)) & 0x3] = TRUE;
-        
-        m_SrcParam[i].m_ComponentReadMask = 0;
-        if(read[0])
-            m_SrcParam[i].m_ComponentReadMask |= D3DSP_WRITEMASK_0;
-        if(read[1])
-            m_SrcParam[i].m_ComponentReadMask |= D3DSP_WRITEMASK_1;
-        if(read[2])
-            m_SrcParam[i].m_ComponentReadMask |= D3DSP_WRITEMASK_2;
-        if(read[3])
-            m_SrcParam[i].m_ComponentReadMask |= D3DSP_WRITEMASK_3;
+    for( i = 0; i < m_SrcParamCount; i++ )
+    {
+        DWORD NeededComponents;
+        DWORD ReadComponents = 0;
+
+        switch( m_Type )
+        {
+        case D3DSIO_TEX:      // only in ps.1.4 does texld have source parameter
+            if( D3DPS_VERSION(1,4) == dwVersion )
+            {
+                // for ps.1.4, texld has a source parameter
+                NeededComponents = D3DSP_WRITEMASK_0 | D3DSP_WRITEMASK_1 | D3DSP_WRITEMASK_2;
+            }
+            else // versions < ps.1.4 don't have a src param on tex, so we shouldn't get here.  But maybe in ps.2.0...
+            {
+                NeededComponents = D3DSP_WRITEMASK_0 | D3DSP_WRITEMASK_1 | D3DSP_WRITEMASK_2 | D3DSP_WRITEMASK_3;
+            }
+            break;
+        case D3DSIO_TEXCOORD:
+            if( D3DPS_VERSION(1,4) == dwVersion )
+            {
+                // for ps.1.4, texcrd has a source parameter
+                NeededComponents = D3DSP_WRITEMASK_0 | D3DSP_WRITEMASK_1 | D3DSP_WRITEMASK_2;
+            }
+            else // versions < ps.1.4 don't have a src param on texcoord, so we shouldn't get here.  But maybe in ps.2.0...
+            {
+                NeededComponents = D3DSP_WRITEMASK_0 | D3DSP_WRITEMASK_1 | D3DSP_WRITEMASK_2 | D3DSP_WRITEMASK_3;
+            }
+            break;
+        case D3DSIO_TEXBEM:
+        case D3DSIO_TEXBEML:
+            NeededComponents = D3DSP_WRITEMASK_0 | D3DSP_WRITEMASK_1;
+            break;
+        case D3DSIO_DP3:
+            NeededComponents = D3DSP_WRITEMASK_0 | D3DSP_WRITEMASK_1 | D3DSP_WRITEMASK_2;
+            break;
+        case D3DSIO_DP4:
+            NeededComponents = D3DSP_WRITEMASK_0 | D3DSP_WRITEMASK_1 | D3DSP_WRITEMASK_2 | D3DSP_WRITEMASK_3;
+            break;
+        case D3DSIO_BEM: // ps.1.4
+            NeededComponents = D3DSP_WRITEMASK_0 | D3DSP_WRITEMASK_1;
+            break;
+        default: 
+            // standard component-wise instruction, 
+            // OR an op we know reads .rgba and we also know it will be validated to .rgba writemask
+            NeededComponents = m_DstParam.m_WriteMask;
+            break;
+        }
+
+        // Figure out which components of this source parameter are read (taking into account swizzle)
+        for(j = 0; j < 4; j++)
+        {
+            if( NeededComponents & COMPONENT_MASKS[j] )
+                ReadComponents |= COMPONENT_MASKS[(m_SrcParam[i].m_SwizzleShift >> (D3DVS_SWIZZLE_SHIFT + 2*j)) & 0x3];
+        }
+        m_SrcParam[i].m_ComponentReadMask = ReadComponents;
     }
 }
 
 //-----------------------------------------------------------------------------
-// CPShaderValidator::CPShaderValidator
+// CBasePShaderValidator::CBasePShaderValidator
 //-----------------------------------------------------------------------------
-CPShaderValidator::CPShaderValidator(   const DWORD* pCode,
+CBasePShaderValidator::CBasePShaderValidator(   const DWORD* pCode,
                                         const D3DCAPS8* pCaps,
-                                        DWORD Flags)
+                                        DWORD Flags )
                                         : CBaseShaderValidator( pCode, pCaps, Flags )
 {
     // Note that the base constructor initialized m_ReturnCode to E_FAIL.
     // Only set m_ReturnCode to S_OK if validation has succeeded,
     // before exiting this constructor.
 
+    m_CycleNum              = 0;
     m_TexOpCount            = 0;
     m_BlendOpCount          = 0;
     m_TotalOpCount          = 0;
-    m_TexMBaseDstReg        = 0;
 
     m_pTempRegFile          = NULL;
     m_pInputRegFile         = NULL;
@@ -92,15 +131,12 @@ CPShaderValidator::CPShaderValidator(   const DWORD* pCode,
 
     if( !m_bBaseInitOk )
         return;
-
-    ValidateShader(); // If successful, m_ReturnCode will be set to S_OK.
-                      // Call GetStatus() on this object to determine validation outcome.
 }
 
 //-----------------------------------------------------------------------------
-// CPShaderValidator::~CPShaderValidator
+// CBasePShaderValidator::~CBasePShaderValidator
 //-----------------------------------------------------------------------------
-CPShaderValidator::~CPShaderValidator()
+CBasePShaderValidator::~CBasePShaderValidator()
 {
     delete m_pTempRegFile;
     delete m_pInputRegFile;
@@ -109,21 +145,21 @@ CPShaderValidator::~CPShaderValidator()
 }
 
 //-----------------------------------------------------------------------------
-// CPShaderValidator::AllocateNewInstruction
+// CBasePShaderValidator::AllocateNewInstruction
 //-----------------------------------------------------------------------------
-CBaseInstruction* CPShaderValidator::AllocateNewInstruction(CBaseInstruction*pPrevInst)
+CBaseInstruction* CBasePShaderValidator::AllocateNewInstruction(CBaseInstruction*pPrevInst)
 {
     return new CPSInstruction((CPSInstruction*)pPrevInst);
 }
 
 //-----------------------------------------------------------------------------
-// CPShaderValidator::DecodeNextInstruction
+// CBasePShaderValidator::DecodeNextInstruction
 //-----------------------------------------------------------------------------
-BOOL CPShaderValidator::DecodeNextInstruction()
+BOOL CBasePShaderValidator::DecodeNextInstruction()
 {
     m_pCurrInst->m_Type = (D3DSHADER_INSTRUCTION_OPCODE_TYPE)(*m_pCurrToken & D3DSI_OPCODE_MASK);
 
-    if( m_pCurrInst->m_Type == D3DSIO_COMMENT )
+    if( D3DSIO_COMMENT == m_pCurrInst->m_Type )
     {
         ParseCommentForAssemblerMessages(m_pCurrToken); // does not advance m_pCurrToken
 
@@ -132,6 +168,10 @@ BOOL CPShaderValidator::DecodeNextInstruction()
         m_pCurrToken += (NumDWORDs+1);
         return TRUE;
     }
+
+    // Find out if the instruction is a TexOp and/or TexMOp.  Needed by multiple validation rules,
+    // as well as further below in DecodeNextInstruction.
+    IsCurrInstTexOp();
 
     // If the assembler has sent us file and/or line number messages,
     // received by ParseCommentForAssemblerMesssages(),
@@ -144,7 +184,7 @@ BOOL CPShaderValidator::DecodeNextInstruction()
     {
         _CURR_PS_INST->m_bCoIssue = TRUE;
     }
-    else
+    else if( D3DSIO_NOP != m_pCurrInst->m_Type )
     {
         m_CycleNum++; // First cycle is 1. (co-issued instructions will have same cycle number)
     }
@@ -153,7 +193,9 @@ BOOL CPShaderValidator::DecodeNextInstruction()
     m_SpewInstructionCount++; // only used for spew, not for any limits
     m_pCurrInst->m_SpewInstructionCount = m_SpewInstructionCount;
 
-    if( (*m_pCurrToken) & PS_INST_TOKEN_RESERVED_MASK )
+    DWORD dwReservedBits = PS_INST_TOKEN_RESERVED_MASK;
+
+    if( (*m_pCurrToken) & dwReservedBits )
     {
         Spew(SPEW_INSTRUCTION_ERROR,m_pCurrInst,"Reserved bit(s) set in instruction parameter token!  Aborting validation.");
         return FALSE;
@@ -162,20 +204,10 @@ BOOL CPShaderValidator::DecodeNextInstruction()
     m_pCurrToken++;
 
     // Decode dst param
-    DWORD dstCount;
-    switch (m_pCurrInst->m_Type)
-    {
-    case D3DSIO_NOP:
-        dstCount = 0;
-        break;
-    default:
-        dstCount = 1;
-        break;
-    }
-    while ((*m_pCurrToken & (1L<<31)) && (dstCount-- > 0))
+    if (*m_pCurrToken & (1L<<31))
     {
         (m_pCurrInst->m_DstParamCount)++;
-        DecodeDstParam( m_pCurrInst->m_Type, &m_pCurrInst->m_DstParam[m_pCurrInst->m_DstParamCount - 1], *m_pCurrToken );
+        DecodeDstParam( &m_pCurrInst->m_DstParam, *m_pCurrToken );
         if( (*m_pCurrToken) & PS_DSTPARAM_TOKEN_RESERVED_MASK )
         {
             Spew(SPEW_INSTRUCTION_ERROR,m_pCurrInst,"Reserved bit(s) set in destination parameter token!  Aborting validation.");
@@ -201,6 +233,7 @@ BOOL CPShaderValidator::DecodeNextInstruction()
         (m_pCurrInst->m_SrcParamCount)++;
         if( (m_pCurrInst->m_SrcParamCount + m_pCurrInst->m_DstParamCount) > SHADER_INSTRUCTION_MAX_PARAMS )
         {
+            m_pCurrInst->m_SrcParamCount--;
             m_pCurrToken++; // eat up extra parameters and skip to next
             continue;
         }
@@ -219,47 +252,82 @@ BOOL CPShaderValidator::DecodeNextInstruction()
 
     // Figure out which components of each source operand actually need to be read,
     // taking into account destination write mask, the type of instruction, source swizzle, etc.
-    m_pCurrInst->CalculateComponentReadMasks();
-
-    // Find out if the instruction is a TexOp and/or TexMOp.  Needed by multiple validation rules.
-    IsCurrInstTexOp();
+    // (must be after IsCurrInstTexOp() )
+    m_pCurrInst->CalculateComponentReadMasks(m_Version);
 
     return TRUE;
 }
 
 //-----------------------------------------------------------------------------
 //
-// CPShaderValidator Wrapper Functions
+// CBasePShaderValidator Wrapper Functions
 //
 //-----------------------------------------------------------------------------
+
+//-----------------------------------------------------------------------------
+// GetNewPSValidator
+//
+// Called by ValidatePixelShaderInternal and ValidatePixelShader below.
+//-----------------------------------------------------------------------------
+CBasePShaderValidator* GetNewPSValidator( const DWORD* pCode,
+                                              const D3DCAPS8* pCaps,
+                                              const DWORD Flags )
+{
+    if( !pCode )
+        return NULL;
+    else if( D3DPS_VERSION(1,4) > *pCode )
+        return new CPShaderValidator10(pCode,pCaps,Flags);
+    else
+        return new CPShaderValidator14(pCode,pCaps,Flags);
+}
 
 //-----------------------------------------------------------------------------
 // ValidatePixelShaderInternal
 //-----------------------------------------------------------------------------
 BOOL ValidatePixelShaderInternal( const DWORD* pCode, const D3DCAPS8* pCaps )
 {
-    CPShaderValidator Validator(pCode,pCaps,0);
-    return SUCCEEDED(Validator.GetStatus()) ? TRUE : FALSE;
+    CBasePShaderValidator * pValidator = NULL;
+    BOOL bSuccess = FALSE;
+
+    pValidator = GetNewPSValidator( pCode, pCaps, 0 );
+    if( NULL == pValidator )
+    {
+        OutputDebugString("Out of memory.\n");
+        return bSuccess;
+    }
+    bSuccess = SUCCEEDED(pValidator->GetStatus()) ? TRUE : FALSE;
+    delete pValidator;
+    return bSuccess;
 }
 
 //-----------------------------------------------------------------------------
 // ValidatePixelShader
 //
+// Don't forget to call "free" on the buffer returned in ppBuf.
 //-----------------------------------------------------------------------------
 HRESULT WINAPI ValidatePixelShader( const DWORD* pCode,
                                     const D3DCAPS8* pCaps,
-                                    const DWORD Flags )
+                                    const DWORD Flags,
+                                    char** const ppBuf )
 {
-    CPShaderValidator Validator(pCode,pCaps,Flags);
-#if 0
+    CBasePShaderValidator * pValidator = NULL;
+    HRESULT hr;
+
+    pValidator = GetNewPSValidator( pCode, pCaps, Flags );
+    if( NULL == pValidator )
+    {
+        OutputDebugString("Out of memory.\n");
+        return E_FAIL;
+    }
     if( ppBuf )
     {
-        *ppBuf = (char*)HeapAlloc(GetProcessHeap(), 0, Validator.GetRequiredLogBufferSize());
+        *ppBuf = (char*)HeapAlloc(GetProcessHeap(), 0, pValidator->GetRequiredLogBufferSize());
         if( NULL == *ppBuf )
             OutputDebugString("Out of memory.\n");
         else
-            Validator.WriteLogToBuffer(*ppBuf);
+            pValidator->WriteLogToBuffer(*ppBuf);
     }
-#endif
-    return Validator.GetStatus();
+    hr = pValidator->GetStatus();
+    delete pValidator;
+    return hr;
 }

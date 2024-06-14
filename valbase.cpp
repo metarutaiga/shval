@@ -7,18 +7,20 @@
 //
 ///////////////////////////////////////////////////////////////////////////////
 #include "pch.cpp"
+#pragma hdrstop
 
 //-----------------------------------------------------------------------------
 // DSTPARAM::DSTPARAM
 //-----------------------------------------------------------------------------
 DSTPARAM::DSTPARAM()
 {
-    m_bParamUsed    = FALSE;
-    m_RegNum        = (UINT)-1;
-    m_WriteMask     = 0;
-    m_DstMod        = D3DSPDM_NONE;
-    m_DstShift      = (DSTSHIFT)-1;
-    m_RegType       = (D3DSHADER_PARAM_REGISTER_TYPE)-1;
+    m_bParamUsed        = FALSE;
+    m_RegNum            = (UINT)-1;
+    m_WriteMask         = 0;
+    m_DstMod            = D3DSPDM_NONE;
+    m_DstShift          = (DSTSHIFT)-1;
+    m_RegType           = (D3DSHADER_PARAM_REGISTER_TYPE)-1;
+    m_ComponentReadMask = 0;
 }
 
 //-----------------------------------------------------------------------------
@@ -49,8 +51,6 @@ CBaseInstruction::CBaseInstruction(CBaseInstruction* pPrevInst)
     m_pSpewLineNumber       = NULL;
     m_pSpewFileName         = NULL;
     m_SpewInstructionCount  = 0;
-    m_CycleNum              = (UINT)-1;
-    m_bCoIssue              = FALSE;
 
     if( pPrevInst )
     {
@@ -67,13 +67,6 @@ void CBaseInstruction::SetSpewFileNameAndLineNumber(const char* pFileName, const
     m_pSpewLineNumber = pLineNumber;
 }
 
-void CBaseInstruction::GetSpewFileNameAndLineNumber(const char** pFileName, DWORD* pLineNumber){
-    *pFileName = m_pSpewFileName;
-    *pLineNumber =  m_pSpewLineNumber ? *m_pSpewLineNumber : 1;
-}
-
-#if 0
-
 //-----------------------------------------------------------------------------
 // CBaseInstruction::MakeInstructionLocatorString
 //
@@ -89,7 +82,7 @@ char* CBaseInstruction::MakeInstructionLocatorString()
 
         if( !pBuffer )
         {
-            DXGRIP("Out of memory.");
+            OutputDebugString("Out of memory.\n");
             return NULL;
         }
 
@@ -113,7 +106,6 @@ char* CBaseInstruction::MakeInstructionLocatorString()
 
     return NULL;
 }
-#endif // 0
 
 //-----------------------------------------------------------------------------
 // CAccessHistoryNode::CAccessHistoryNode
@@ -247,14 +239,16 @@ BOOL CAccessHistory::InsertReadBeforeWrite(CAccessHistoryNode* pWriteNode, CBase
 //-----------------------------------------------------------------------------
 // CRegisterFile::CRegisterFile
 //-----------------------------------------------------------------------------
-CRegisterFile::CRegisterFile(UINT NumRegisters, BOOL bWritable, UINT NumReadPorts)
+CRegisterFile::CRegisterFile(UINT NumRegisters, 
+                             BOOL bWritable, 
+                             UINT NumReadPorts, 
+                             BOOL bPreShaderInitialized)
 {
     m_bInitOk = FALSE;
     m_NumRegisters = NumRegisters;
     m_bWritable = bWritable;
     m_NumReadPorts = NumReadPorts;
 
-    BOOL bAssumeInitialized = (!bWritable && NumReadPorts > 0);
     for( UINT i = 0; i < NUM_COMPONENTS_IN_REGISTER; i++ )
     {
         if( m_NumRegisters )
@@ -262,18 +256,14 @@ CRegisterFile::CRegisterFile(UINT NumRegisters, BOOL bWritable, UINT NumReadPort
             m_pAccessHistory[i] = new CAccessHistory[m_NumRegisters];
             if( NULL == m_pAccessHistory[i] )
             {
-                DXGRIP( "Direct3D Shader Validator: Out of memory.\n" );
+                OutputDebugString( "Direct3D Shader Validator: Out of memory.\n" );
                 m_NumRegisters = 0;
                 return;
             }
         }
-        else {
-            m_pAccessHistory[i] = NULL;
-        }
         for( UINT j = 0; j < m_NumRegisters; j++ )
         {
-            if( bAssumeInitialized )
-                m_pAccessHistory[i][j].m_bPreShaderInitialized = TRUE;
+            m_pAccessHistory[i][j].m_bPreShaderInitialized = bPreShaderInitialized;
         }
         // To get the access history for a component of a register, use:
         // m_pAccessHistory[component][register number]
@@ -302,7 +292,7 @@ CBaseShaderValidator::CBaseShaderValidator( const DWORD* pCode, const D3DCAPS8* 
     m_pLog                  = new CErrorLog(Flags & SHADER_VALIDATOR_LOG_ERRORS);
     if( NULL == m_pLog )
     {
-        DXGRIP("D3D Shader Validator: no error log.\n");
+        OutputDebugString("D3D PixelShader Validator: Out of memory.\n");
         return;
     }
 
@@ -324,7 +314,6 @@ CBaseShaderValidator::CBaseShaderValidator( const DWORD* pCode, const D3DCAPS8* 
 
     m_pLatestSpewLineNumber = NULL; 
     m_pLatestSpewFileName   = NULL;
-    m_CycleNum              = 0;
 
     for( UINT i = 0; i < SHADER_INSTRUCTION_MAX_SRCPARAMS; i++ )
     {
@@ -346,13 +335,13 @@ CBaseShaderValidator::~CBaseShaderValidator()
         m_pCurrInst = m_pCurrInst->m_pPrevInst;
         delete pDeleteMe;
     }
+    delete m_pLog;
 }
-
 
 //-----------------------------------------------------------------------------
 // CBaseShaderValidator::DecodeDstParam
 //-----------------------------------------------------------------------------
-void CBaseShaderValidator::DecodeDstParam( D3DSHADER_INSTRUCTION_OPCODE_TYPE instruction, DSTPARAM* pDstParam, DWORD Token )
+void CBaseShaderValidator::DecodeDstParam( DSTPARAM* pDstParam, DWORD Token )
 {
     DXGASSERT(pDstParam);
     pDstParam->m_bParamUsed = TRUE;
@@ -390,10 +379,7 @@ void CBaseShaderValidator::ValidateShader()
     {
         // Returns false on:
         // 1) Unrecognized version token, 
-        // 2) Pixel shader version (0xff,0xff) - in this case
-        //    case InitValidation() sets m_ReturnCode to S_OK.
-        //    We are just forcing validation to succeed for version (0xff,0xff)
-        // 3) Vertex shader declaration validation with no shader code (fixed function).
+        // 2) Vertex shader declaration validation with no shader code (fixed function).
         //    In this case InitValidation() sets m_ReturnCode as appropriate.
         return;
     }
@@ -494,24 +480,32 @@ void CBaseShaderValidator::Spew(    SPEW_TYPE SpewType,
         int BytesStored = 0;
         int BytesLeft = Length;
         char *pIndex    = NULL;
+        char* pErrorLocationText = NULL;
 
         pBuffer = new char[Length];
         if( !pBuffer )
         {
-            DXGRIP("Out of memory.\n");
+            OutputDebugString("Out of memory.\n");
             return;
         }
         pIndex = pBuffer;
 
-        const char* pFileName = NULL;
-        DWORD lineNumber = 0;
         // Code location text
         switch( SpewType )
         {
         case SPEW_INSTRUCTION_ERROR:
+        case SPEW_INSTRUCTION_WARNING:
             if( pInst )
-                pInst->GetSpewFileNameAndLineNumber(&pFileName, &lineNumber);
+                pErrorLocationText = pInst->MakeInstructionLocatorString();
             break;
+        }
+
+        if( pErrorLocationText )
+        {
+            BytesStored = _snprintf( pIndex, BytesLeft - 1, pErrorLocationText );
+            if( BytesStored < 0 ) goto OverFlow;
+            BytesLeft -= BytesStored;
+            pIndex += BytesStored;
         }
 
         // Spew text prefix
@@ -521,13 +515,13 @@ void CBaseShaderValidator::Spew(    SPEW_TYPE SpewType,
             BytesStored = _snprintf( pIndex, BytesLeft - 1, "(Validation Error) " );
             break;
         case SPEW_GLOBAL_ERROR:
-            BytesStored = _snprintf( pIndex, BytesLeft - 1, "(Validation Global Error) " );
+            BytesStored = _snprintf( pIndex, BytesLeft - 1, "(Global Validation Error) " );
             break;
         case SPEW_INSTRUCTION_WARNING:
             BytesStored = _snprintf( pIndex, BytesLeft - 1, "(Validation Warning) " );
             break;
         case SPEW_GLOBAL_WARNING:
-            BytesStored = _snprintf( pIndex, BytesLeft - 1, "(Validation Global Warning) " );
+            BytesStored = _snprintf( pIndex, BytesLeft - 1, "(Global Validation Warning) " );
             break;
         }
         if( BytesStored < 0 ) goto OverFlow;
@@ -545,9 +539,11 @@ void CBaseShaderValidator::Spew(    SPEW_TYPE SpewType,
 
         m_pLog->AppendText(pBuffer);
 
+        delete [] pErrorLocationText;
         delete [] pBuffer;
         break;
 OverFlow:
+        delete [] pErrorLocationText;
         delete [] pBuffer;
         pBuffer = NULL;
         Length = Length * 2;
@@ -563,10 +559,10 @@ char* CBaseShaderValidator::MakeAffectedComponentsText( DWORD ComponentMask,
                                                         BOOL bColorLabels, 
                                                         BOOL bPositionLabels)
 {
-    char* ColorLabels[4] = {"R/", "G/", "B/", "A/"};
-    char* PositionLabels[4] = {"X/", "Y/", "Z/", "W/"};
+    char* ColorLabels[4] = {"r/", "g/", "b/", "a/"};
+    char* PositionLabels[4] = {"x/", "y/", "z/", "w/"};
     char* NumericLabels[4] = {"0 ", "1 ", "2 ", "3"}; // always used
-    static char s_AffectedComponents[28]; // enough to hold "*R/X/0 *G/Y/1 *B/Z/2 *A/W/3"
+    static char s_AffectedComponents[28]; // enough to hold "*r/x/0 *g/y/1 *b/z/2 *a/w/3"
     UINT  LabelCount = 0;
 
     s_AffectedComponents[0] = '\0';

@@ -9,8 +9,11 @@
 
 #ifdef __clang__
 #pragma clang diagnostic ignored "-Wcomma"
+#pragma clang diagnostic ignored "-Wconditional-uninitialized"
 #pragma clang diagnostic ignored "-Wdelete-abstract-non-virtual-dtor"
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
 #pragma clang diagnostic ignored "-Wextra-tokens"
+#pragma clang diagnostic ignored "-Wformat-security"
 #pragma clang diagnostic ignored "-Wlogical-not-parentheses"
 #pragma clang diagnostic ignored "-Wswitch"
 #pragma clang diagnostic ignored "-Wuninitialized"
@@ -32,6 +35,7 @@
 #define E_FAIL -1
 #define SUCCEEDED(x) (x == S_OK)
 #define WINAPI
+#define HeapAlloc(a,b,c) malloc(c)
 #define OutputDebugString printf
 #define lstrlen strlen
 #define _snprintf snprintf

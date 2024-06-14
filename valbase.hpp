@@ -9,9 +9,9 @@
 #ifndef __VALBASE_HPP__
 #define __VALBASE_HPP__
 
-#define SHADER_INSTRUCTION_MAX_PARAMS       7
-#define SHADER_INSTRUCTION_MAX_DSTPARAMS    3
-#define SHADER_INSTRUCTION_MAX_SRCPARAMS    7
+#define NUM_COMPONENTS_IN_REGISTER  4
+#define SHADER_INSTRUCTION_MAX_PARAMS       4
+#define SHADER_INSTRUCTION_MAX_SRCPARAMS    (SHADER_INSTRUCTION_MAX_PARAMS - 1)
 
 typedef enum _SPEW_TYPE
 {
@@ -51,9 +51,13 @@ public:
     BOOL                            m_bParamUsed;   // Does instruction have dest param?
     UINT                            m_RegNum;
     DWORD                           m_WriteMask;    // writemasks (D3DSP_WRITEMASK_*)  
-    D3DSHADER_PARAM_DSTMOD_TYPE     m_DstMod;       // D3DSPDM_NONE, D3DSPDM_BIAS (PShader)
+    D3DSHADER_PARAM_DSTMOD_TYPE     m_DstMod;       // D3DSPDM_NONE, D3DSPDM_SATURATE (PShader)
     DSTSHIFT                        m_DstShift;     // _x2, _x4, etc. (PShader)
     D3DSHADER_PARAM_REGISTER_TYPE   m_RegType;      // _TEMP, _ADDRESS, etc.
+
+    DWORD                           m_ComponentReadMask; // Which components instruction needs to read
+                                                         // This seems strage, but in ps.2.0 there are some ops
+                                                         // that have one parameter (dest), but they read from it, and write back to it.
 };
 
 //-----------------------------------------------------------------------------
@@ -66,8 +70,8 @@ public:
 
     BOOL                            m_bParamUsed;   // Does instruction have this src param?
     UINT                            m_RegNum;
-    DWORD                           m_SwizzleShift; // D3DVS_*_* (VShader), or D3DSP_NOSWIZZLE,
-                                                    // D3DSP_REPLICATEALPHA (PShader)
+    DWORD                           m_SwizzleShift; // D3DVS_*_*, or D3DSP_NOSWIZZLE/
+                                                    // D3DSP_REPLICATERED/GREEN/BLUE/ALPHA
     D3DVS_ADDRESSMODE_TYPE          m_AddressMode;  // D3DVS_ADDRMODE_ABSOLUTE / _RELATIVE (VShader)
     DWORD                           m_RelativeAddrComponent; // One of D3DSP_WRITEMASK_0, 1, 2, or 3. (VShader)
     D3DSHADER_PARAM_SRCMOD_TYPE     m_SrcMod;       // _NEG, _BIAS, etc.
@@ -84,9 +88,8 @@ class CBaseInstruction
 public:
     CBaseInstruction(CBaseInstruction* pPrevInst);  // Append to linked list
     void SetSpewFileNameAndLineNumber(const char* pFileName, const DWORD* pLineNumber);
-    void GetSpewFileNameAndLineNumber(const char** pFileName, DWORD* pLineNumber);
-    // char* MakeInstructionLocatorString();
-    virtual void CalculateComponentReadMasks() = 0; // which components to each source read?
+    char* MakeInstructionLocatorString();
+    virtual void CalculateComponentReadMasks(DWORD dwVersion) = 0; // which components to each source read?
 
     // Instruction Description
     D3DSHADER_INSTRUCTION_OPCODE_TYPE   m_Type;
@@ -97,11 +100,9 @@ public:
     const DWORD*                        m_pSpewLineNumber; // points to line number embedded in shader by assembler (if present)
     const char*                         m_pSpewFileName;   // points to file name embedded in shader (if present)
     UINT                                m_SpewInstructionCount; // only used for spew, not for any limit checking
-    BOOL    m_bCoIssue;
-    UINT    m_CycleNum; // identical for co-issued instructions
 
     // Destination Parameter Description
-    DSTPARAM    m_DstParam[SHADER_INSTRUCTION_MAX_DSTPARAMS];
+    DSTPARAM    m_DstParam;
     
     // Source Parameters
     SRCPARAM    m_SrcParam[SHADER_INSTRUCTION_MAX_SRCPARAMS];
@@ -156,8 +157,7 @@ class CRegisterFile
     UINT    m_NumReadPorts;
     BOOL    m_bInitOk;
 public:
-    #define NUM_COMPONENTS_IN_REGISTER  4
-    CRegisterFile(UINT NumRegisters, BOOL bWritable, UINT NumReadPorts);
+    CRegisterFile(UINT NumRegisters, BOOL bWritable, UINT NumReadPorts, BOOL bPreShaderInitialized );
     ~CRegisterFile();
 
     inline UINT GetNumRegs() {return m_NumRegisters;};    
@@ -183,8 +183,6 @@ protected:
     DWORD                       m_ErrorCount;
     CErrorLog*                  m_pLog;
     CBaseInstruction*           m_pCurrInst;
-    UINT                        m_CycleNum;
-
     const D3DCAPS8*             m_pCaps;  // can be NULL if not provided.
     const DWORD*                m_pLatestSpewLineNumber; // points to latest line number sent in comment from D3DX Assembler
     const char*                 m_pLatestSpewFileName;   // points to latest file name sent in comment from D3DX Assembler
@@ -193,7 +191,7 @@ protected:
     BOOL                        m_bSrcParamError[SHADER_INSTRUCTION_MAX_SRCPARAMS]; 
 
     virtual BOOL                DecodeNextInstruction() = 0;
-    void                        DecodeDstParam( D3DSHADER_INSTRUCTION_OPCODE_TYPE instruction, DSTPARAM* pDstParam, DWORD Token );
+    void                        DecodeDstParam( DSTPARAM* pDstParam, DWORD Token );
     void                        DecodeSrcParam( SRCPARAM* pSrcParam, DWORD Token );
     virtual BOOL                InitValidation() = 0;
     void                        ValidateShader();
@@ -211,6 +209,19 @@ protected:
 public:
     CBaseShaderValidator( const DWORD* pCode, const D3DCAPS8* pCaps, DWORD Flags );
     ~CBaseShaderValidator();
+
+    DWORD GetRequiredLogBufferSize()
+    {
+        if( m_pLog ) 
+            return m_pLog->GetRequiredLogBufferSize();
+        else
+            return 0;
+    }
+
+    void WriteLogToBuffer( char* pBuffer )
+    {
+        if( m_pLog ) m_pLog->WriteLogToBuffer( pBuffer );
+    }
 
     HRESULT GetStatus() { return m_ReturnCode; }; 
 };

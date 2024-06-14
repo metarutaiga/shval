@@ -7,6 +7,7 @@
 //
 ///////////////////////////////////////////////////////////////////////////////
 #include "pch.cpp"
+#pragma hdrstop
 
 // Use these macros when looking at CVSInstruction derived members of the current instruction (CBaseInstruction)
 #define _CURR_VS_INST   ((CVSInstruction*)m_pCurrInst)
@@ -41,9 +42,9 @@
 //-----------------------------------------------------------------------------
 
 //-----------------------------------------------------------------------------
-// CVSInstruction::CalculateComponentReadMasks()
+// CVSInstruction::CalculateComponentReadMasks(DWORD dwVersion)
 //-----------------------------------------------------------------------------
-void CVSInstruction::CalculateComponentReadMasks()
+void CVSInstruction::CalculateComponentReadMasks(DWORD dwVersion)
 {
     for( UINT i = 0; i < m_SrcParamCount; i++ )
     {
@@ -59,7 +60,7 @@ void CVSInstruction::CalculateComponentReadMasks()
             case D3DSIO_MUL:
             case D3DSIO_SLT:
             case D3DSIO_SGE:
-                PostSwizzleComponentReadMask = m_DstParam[0].m_WriteMask; // per-component ops.
+                PostSwizzleComponentReadMask = m_DstParam.m_WriteMask; // per-component ops.
                 break;
             case D3DSIO_DP3:
                 PostSwizzleComponentReadMask = D3DSP_WRITEMASK_0 | D3DSP_WRITEMASK_1 | D3DSP_WRITEMASK_2;
@@ -120,7 +121,7 @@ void CVSInstruction::CalculateComponentReadMasks()
 CVShaderValidator::CVShaderValidator( const DWORD* pCode, 
                                       const DWORD* pDecl,
                                       const D3DCAPS8* pCaps,
-                                      DWORD Flags )
+                                      DWORD Flags ) 
                                       : CBaseShaderValidator( pCode, pCaps, Flags )
 {
     // Note that the base constructor initialized m_ReturnCode to E_FAIL.  
@@ -129,6 +130,16 @@ CVShaderValidator::CVShaderValidator( const DWORD* pCode,
 
     m_pDecl                     = pDecl;
     m_bFixedFunction            = pDecl && !pCode;
+    if( pCaps )
+    {
+        m_dwMaxVertexShaderConst = pCaps->MaxVertexShaderConst;
+        m_bIgnoreConstantInitializationChecks = FALSE;
+    }
+    else
+    {
+        m_dwMaxVertexShaderConst = 0;
+        m_bIgnoreConstantInitializationChecks = TRUE;
+    }
 
     m_pTempRegFile              = NULL;
     m_pInputRegFile             = NULL;
@@ -197,27 +208,30 @@ BOOL CVShaderValidator::DecodeNextInstruction()
     // to exactly where a problem is located.
     m_pCurrInst->SetSpewFileNameAndLineNumber(m_pLatestSpewFileName,m_pLatestSpewLineNumber);
 
-    if( *m_pCurrToken & D3DSI_COISSUE )
-    {
-        m_pCurrInst->m_bCoIssue = TRUE;
-    }
-    else
-    {
-        m_CycleNum++; // First cycle is 1. (co-issued instructions will have same cycle number)
-    }
-    m_pCurrInst->m_CycleNum = m_CycleNum;
-
-    m_pCurrToken++;
-
     m_SpewInstructionCount++; // only used for spew, not for any limits
     m_pCurrInst->m_SpewInstructionCount = m_SpewInstructionCount;
 
-  
+    DWORD dwReservedBits = VS_INST_TOKEN_RESERVED_MASK;
+
+    if( (*m_pCurrToken) & dwReservedBits )
+    {
+        Spew(SPEW_INSTRUCTION_ERROR,m_pCurrInst,"Reserved bit(s) set in instruction parameter token!  Aborting validation.");
+        return FALSE;
+    }
+
+    m_pCurrToken++;
+
     // Decode dst param
     if (*m_pCurrToken & (1L<<31))
     {
         (m_pCurrInst->m_DstParamCount)++;
-        DecodeDstParam( m_pCurrInst->m_Type, &m_pCurrInst->m_DstParam[0], *(m_pCurrToken++) );
+        DecodeDstParam( &m_pCurrInst->m_DstParam, *m_pCurrToken );
+        if( (*m_pCurrToken) & VS_DSTPARAM_TOKEN_RESERVED_MASK )
+        {
+            Spew(SPEW_INSTRUCTION_ERROR,m_pCurrInst,"Reserved bit(s) set in destination parameter token!  Aborting validation.");
+            return FALSE;
+        }
+        m_pCurrToken++;
     }
 
     // Decode src param(s)
@@ -226,17 +240,26 @@ BOOL CVShaderValidator::DecodeNextInstruction()
         (m_pCurrInst->m_SrcParamCount)++;
         if( (m_pCurrInst->m_DstParamCount + m_pCurrInst->m_SrcParamCount) > SHADER_INSTRUCTION_MAX_PARAMS )
         {
+            m_pCurrInst->m_SrcParamCount--;
             m_pCurrToken++; // eat up extra parameters and skip to next
             continue;
         }
         
         // Below: index is [SrcParamCount - 1] because m_SrcParam array needs 0 based index.
-        DecodeSrcParam( &(m_pCurrInst->m_SrcParam[m_pCurrInst->m_SrcParamCount - 1]),*(m_pCurrToken++) );
+        DecodeSrcParam( &(m_pCurrInst->m_SrcParam[m_pCurrInst->m_SrcParamCount - 1]),*m_pCurrToken );
+
+        if( (*m_pCurrToken) & VS_SRCPARAM_TOKEN_RESERVED_MASK )
+        {
+            Spew(SPEW_INSTRUCTION_ERROR,m_pCurrInst,"Reserved bit(s) set in source %d parameter token!  Aborting validation.",
+                            m_pCurrInst->m_SrcParamCount);
+            return FALSE;
+        }
+        m_pCurrToken++;
     }
 
     // Figure out which components of each source operand actually need to be read,
     // taking into account destination write mask, the type of instruction, source swizzle, etc.
-    m_pCurrInst->CalculateComponentReadMasks();
+    m_pCurrInst->CalculateComponentReadMasks(m_Version);
 
     return TRUE;
 }
@@ -248,13 +271,13 @@ BOOL CVShaderValidator::InitValidation()
 {
     if( m_bFixedFunction ) 
     {
-        m_pTempRegFile              = new CRegisterFile(0,FALSE,0);// #regs, bWritable, max# reads/instruction
-        m_pInputRegFile             = new CRegisterFile(17,FALSE,0);
-        m_pConstRegFile             = new CRegisterFile(0,FALSE,0);
-        m_pAddrRegFile              = new CRegisterFile(0,FALSE,0);
-        m_pTexCrdOutputRegFile      = new CRegisterFile(0,FALSE,0);
-        m_pAttrOutputRegFile        = new CRegisterFile(0,FALSE,0);
-        m_pRastOutputRegFile        = new CRegisterFile(0,FALSE,0);
+        m_pTempRegFile              = new CRegisterFile(0,FALSE,0,TRUE);// #regs, bWritable, max# reads/instruction, pre-shader initialized
+        m_pInputRegFile             = new CRegisterFile(17,FALSE,0,TRUE);
+        m_pConstRegFile             = new CRegisterFile(0,FALSE,0,TRUE);
+        m_pAddrRegFile              = new CRegisterFile(0,FALSE,0,TRUE);
+        m_pTexCrdOutputRegFile      = new CRegisterFile(0,FALSE,0,TRUE);
+        m_pAttrOutputRegFile        = new CRegisterFile(0,FALSE,0,TRUE);
+        m_pRastOutputRegFile        = new CRegisterFile(0,FALSE,0,TRUE);
     }
     else
     {    
@@ -286,22 +309,28 @@ BOOL CVShaderValidator::InitValidation()
         switch(m_Version)
         {
         case D3DVS_VERSION(1,0):    // DX8
-            m_pTempRegFile              = new CRegisterFile(12,TRUE,3);// #regs, bWritable, max# reads/instruction
-            m_pInputRegFile             = new CRegisterFile(16,FALSE,1);
-            m_pConstRegFile             = new CRegisterFile(96,FALSE,1);
-            m_pAddrRegFile              = new CRegisterFile(0,TRUE,0);
-            m_pTexCrdOutputRegFile      = new CRegisterFile(8,TRUE,0);
-            m_pAttrOutputRegFile        = new CRegisterFile(2,TRUE,0);
-            m_pRastOutputRegFile        = new CRegisterFile(3,TRUE,0);
+            m_pTempRegFile              = new CRegisterFile(12,TRUE,3,FALSE);// #regs, bWritable, max# reads/instruction, pre-shader initialized
+            m_pInputRegFile             = new CRegisterFile(16,FALSE,1,TRUE);
+            if( m_bIgnoreConstantInitializationChecks )
+                m_pConstRegFile             = new CRegisterFile(0,FALSE,1,TRUE); // still creating register file so we can validate number of read ports
+            else
+                m_pConstRegFile             = new CRegisterFile(m_dwMaxVertexShaderConst,FALSE,1,TRUE);
+            m_pAddrRegFile              = new CRegisterFile(0,TRUE,0,FALSE);
+            m_pTexCrdOutputRegFile      = new CRegisterFile(8,TRUE,0,FALSE);
+            m_pAttrOutputRegFile        = new CRegisterFile(2,TRUE,0,FALSE);
+            m_pRastOutputRegFile        = new CRegisterFile(3,TRUE,0,FALSE);
             break;
         case D3DVS_VERSION(1,1):    // DX8
-            m_pTempRegFile              = new CRegisterFile(12,TRUE,3);// #regs, bWritable, max# reads/instruction
-            m_pInputRegFile             = new CRegisterFile(17,FALSE,1);
-            m_pConstRegFile             = new CRegisterFile(96,FALSE,1);
-            m_pAddrRegFile              = new CRegisterFile(1,TRUE,0);
-            m_pTexCrdOutputRegFile      = new CRegisterFile(8,TRUE,0);
-            m_pAttrOutputRegFile        = new CRegisterFile(2,TRUE,0);
-            m_pRastOutputRegFile        = new CRegisterFile(3,TRUE,0);
+            m_pTempRegFile              = new CRegisterFile(12,TRUE,3,FALSE);// #regs, bWritable, max# reads/instruction, pre-shader initialized
+            m_pInputRegFile             = new CRegisterFile(16,FALSE,1,TRUE);
+            if( m_bIgnoreConstantInitializationChecks )
+                m_pConstRegFile             = new CRegisterFile(0,FALSE,1,TRUE); // still creating register file so we can validate number of read ports
+            else
+                m_pConstRegFile             = new CRegisterFile(m_dwMaxVertexShaderConst,FALSE,1,TRUE);
+            m_pAddrRegFile              = new CRegisterFile(1,TRUE,0,FALSE);
+            m_pTexCrdOutputRegFile      = new CRegisterFile(8,TRUE,0,FALSE);
+            m_pAttrOutputRegFile        = new CRegisterFile(2,TRUE,0,FALSE);
+            m_pRastOutputRegFile        = new CRegisterFile(3,TRUE,0,FALSE);
             break;
         default:
             Spew( SPEW_GLOBAL_ERROR, NULL, "Version Token: %d.%d is not a supported vertex shader version. Aborting vertex shader validation.",
@@ -372,7 +401,8 @@ void CVShaderValidator::ValidateDeclaration()
         goto Exit;
     }
                                 
-    DXGASSERT(m_pConstRegFile && m_pInputRegFile);
+    DXGASSERT(m_pConstRegFile && m_pInputRegFile); // if we have a declaration, we better have these two register files 
+    DXGASSERT(!m_bIgnoreConstantInitializationChecks); // we better have d3d8 caps if we have a decl to verify!
 
     if( m_pCaps ) // only validate stream numbers when caps present
     {
@@ -395,12 +425,10 @@ void CVShaderValidator::ValidateDeclaration()
     // The constructor for the input register file assumed that the input regs were initialized,
     // but now that we are parsing a shader declaration, 
     // we can check initialization of input registers.
+    for( UINT i = 0; i < 4; i++ )
     {
-        for( UINT i = 0; i < 4; i++ )
-        {
-            for( UINT j = 0; j < m_pInputRegFile->GetNumRegs(); j++ )
-                m_pInputRegFile->m_pAccessHistory[i][j].m_bPreShaderInitialized = FALSE;
-        }
+        for( UINT j = 0; j < m_pInputRegFile->GetNumRegs(); j++ )
+            m_pInputRegFile->m_pAccessHistory[i][j].m_bPreShaderInitialized = FALSE;
     }
     
     // Now parse the declaration.
@@ -502,6 +530,7 @@ void CVShaderValidator::ValidateDeclaration()
                 case D3DVSDT_FLOAT3:
                 case D3DVSDT_FLOAT4:
                 case D3DVSDT_D3DCOLOR:
+                case D3DVSDT_UBYTE4:
                 case D3DVSDT_SHORT2:
                 case D3DVSDT_SHORT4:
                     break;
@@ -666,37 +695,33 @@ void CVShaderValidator::ValidateDeclaration()
     }
 
     // Make sure inputs to normal gen operations have been initialized
+    for( UINT i = 0; i < NumNormalGenOperations; i++ )
     {
-        for( UINT i = 0; i < NumNormalGenOperations; i++ )
+        for( UINT Component = 0; Component < 4; Component++ )
         {
-            for( UINT Component = 0; Component < 4; Component++ )
+            if( FALSE == m_pInputRegFile->m_pAccessHistory[Component][pNormalGenOperations[i].SourceReg].m_bPreShaderInitialized )
             {
-                if( FALSE == m_pInputRegFile->m_pAccessHistory[Component][pNormalGenOperations[i].SourceReg].m_bPreShaderInitialized )
-                {
-                    Spew( SPEW_GLOBAL_ERROR, NULL, "Declaration Token %d: Source input register %d for normal generation has not been declared.",
-                           pNormalGenOperations[i].TokenNum, pNormalGenOperations[i].SourceReg);
-                    m_ErrorCount++;
-                    break;                
-                }
+                Spew( SPEW_GLOBAL_ERROR, NULL, "Declaration Token %d: Source input register %d for normal generation has not been declared.",
+                       pNormalGenOperations[i].TokenNum, pNormalGenOperations[i].SourceReg);
+                m_ErrorCount++;
+                break;                
             }
         }
     }
 
     // Set outputs of normal gen operations to initialized
+    for( UINT i = 0; i < NumNormalGenOperations; i++ )
     {
-        for( UINT i = 0; i < NumNormalGenOperations; i++ )
+        for( UINT Component = 0; Component < 4; Component++ )
         {
-            for( UINT Component = 0; Component < 4; Component++ )
+            if( TRUE == m_pInputRegFile->m_pAccessHistory[Component][pNormalGenOperations[i].DestReg].m_bPreShaderInitialized )
             {
-                if( TRUE == m_pInputRegFile->m_pAccessHistory[Component][pNormalGenOperations[i].DestReg].m_bPreShaderInitialized )
-                {
-                    Spew( SPEW_GLOBAL_ERROR, NULL, "Declaration Token #%d: Input reg %d specified as destination for normal generation is already declared elsewhere.",
-                                pNormalGenOperations[i].TokenNum, pNormalGenOperations[i].DestReg);
-                    m_ErrorCount++;
-                    break;
-                }
-                m_pInputRegFile->m_pAccessHistory[Component][pNormalGenOperations[i].DestReg].m_bPreShaderInitialized = TRUE;
+                Spew( SPEW_GLOBAL_ERROR, NULL, "Declaration Token #%d: Input reg %d specified as destination for normal generation is already declared elsewhere.",
+                            pNormalGenOperations[i].TokenNum, pNormalGenOperations[i].DestReg);
+                m_ErrorCount++;
+                break;
             }
+            m_pInputRegFile->m_pAccessHistory[Component][pNormalGenOperations[i].DestReg].m_bPreShaderInitialized = TRUE;
         }
     }
 
@@ -934,7 +959,8 @@ BOOL CVShaderValidator::Rule_ValidParamCount()
 // ** Rule:
 // For each source parameter,
 //     Source register type must be D3DSPR_TEMP/_INPUT/_CONST.
-//     Register # must be within range for register type.
+//     Register # must be within range for register type,
+//     including the special case where matrix macro ops read source reg# + offset.
 //     Modifier must be D3DSPSM_NONE or _NEG.
 //     If version is < 1.1, addressmode must be absolute.
 //     If the register type is not _CONST, addressmode must be absolute.
@@ -961,33 +987,93 @@ BOOL CVShaderValidator::Rule_ValidSrcParams()  // could break this down for more
         BOOL bFoundSrcError = FALSE;
         SRCPARAM* pSrcParam = &(m_pCurrInst->m_SrcParam[i]);
         UINT ValidRegNum = 0;
+        BOOL bSkipOutOfRangeCheck = FALSE;
         char* SourceName[3] = {"first", "second", "third"};
         switch(pSrcParam->m_RegType)
         {
         case D3DSPR_TEMP:       ValidRegNum = m_pTempRegFile->GetNumRegs(); break;
         case D3DSPR_INPUT:      ValidRegNum = m_pInputRegFile->GetNumRegs(); break;
-        case D3DSPR_CONST:      ValidRegNum = m_pConstRegFile->GetNumRegs(); break;
+        case D3DSPR_CONST:      
+            if(m_bIgnoreConstantInitializationChecks)
+                bSkipOutOfRangeCheck = TRUE;
+            else
+                ValidRegNum = m_pConstRegFile->GetNumRegs(); 
+            break;
         default:
             Spew( SPEW_INSTRUCTION_ERROR, m_pCurrInst, "Invalid reg type for %s source param.", SourceName[i]);
             m_ErrorCount++;
             bFoundSrcError = TRUE;
         }
 
-        if( (!bFoundSrcError) )
+        if( (!bFoundSrcError) && (!bSkipOutOfRangeCheck)) 
         {
-            if (pSrcParam->m_RegNum >= ValidRegNum)
+            UINT NumConsecutiveRegistersUsed = 1;
+            if( 1 == i )
+            {
+                switch( m_pCurrInst->m_Type )
+                {
+                    case D3DSIO_M3x2:
+                        NumConsecutiveRegistersUsed = 2;
+                        break;
+                    case D3DSIO_M3x3:
+                        NumConsecutiveRegistersUsed = 3;
+                        break;
+                    case D3DSIO_M3x4:
+                        NumConsecutiveRegistersUsed = 4;
+                        break;
+                    case D3DSIO_M4x3:
+                        NumConsecutiveRegistersUsed = 3;
+                        break;
+                    case D3DSIO_M4x4:
+                        NumConsecutiveRegistersUsed = 4;
+                        break;
+                }
+            }
+
+            if((pSrcParam->m_RegNum >= ValidRegNum) && (D3DVS_ADDRMODE_ABSOLUTE == pSrcParam->m_AddressMode))
             {
                 Spew( SPEW_INSTRUCTION_ERROR, m_pCurrInst, "Invalid reg num: %d for %s source param. Max allowed for this type is %d.",
                                     pSrcParam->m_RegNum, SourceName[i], ValidRegNum - 1);
                 m_ErrorCount++;
                 bFoundSrcError = TRUE;
             }
+            else if( NumConsecutiveRegistersUsed > 1 )
+            {
+                if( pSrcParam->m_RegNum + NumConsecutiveRegistersUsed - 1 >= ValidRegNum )
+                {
+                    if( !((D3DSPR_CONST == pSrcParam->m_RegType) && (D3DVS_ADDRMODE_RELATIVE == pSrcParam->m_AddressMode)) )
+                    {
+                        Spew( SPEW_INSTRUCTION_ERROR, m_pCurrInst, 
+                            "Reg num: %d for %s source param on matrix instruction causes attempt to access out of range register number %d. Max allowed for this type is %d.",
+                                            pSrcParam->m_RegNum, SourceName[i], pSrcParam->m_RegNum + NumConsecutiveRegistersUsed - 1, ValidRegNum - 1);
+                    }
+                    m_ErrorCount++;
+                    bFoundSrcError = TRUE;
+                }
+            }
         }
+        
 
         switch( pSrcParam->m_SrcMod )
         {
-        case D3DSPSM_NONE:
         case D3DSPSM_NEG:
+            if( 1 == i )
+            {
+                switch( m_pCurrInst->m_Type )
+                {
+                case D3DSIO_M3x2:
+                case D3DSIO_M3x3:
+                case D3DSIO_M3x4:
+                case D3DSIO_M4x3:
+                case D3DSIO_M4x4:
+                    Spew( SPEW_INSTRUCTION_ERROR, m_pCurrInst, "Cannot negate second source parameter to vector*matrix instructions.");
+                    m_ErrorCount++;
+                    bFoundSrcError = TRUE;        
+                    break;
+                }
+            }
+            break;
+        case D3DSPSM_NONE:
             break;
         default:
             Spew( SPEW_INSTRUCTION_ERROR, m_pCurrInst, "Invalid src mod for %s source param.",
@@ -1021,18 +1107,20 @@ BOOL CVShaderValidator::Rule_ValidSrcParams()  // could break this down for more
 
         if( pSrcParam->m_SwizzleShift != D3DSP_NOSWIZZLE )
         {
-            switch( m_pCurrInst->m_Type )
+            if( 1 == i )
             {
-            case D3DSIO_M3x2:
-            case D3DSIO_M3x3:
-            case D3DSIO_M3x4:
-            case D3DSIO_M4x3:
-            case D3DSIO_M4x4:
-                Spew( SPEW_INSTRUCTION_ERROR, m_pCurrInst, "Cannot swizzle on vector*matrix instructions.",
-                                    SourceName[i]);
-                m_ErrorCount++;
-                bFoundSrcError = TRUE;        
-                break;
+                switch( m_pCurrInst->m_Type )
+                {
+                case D3DSIO_M3x2:
+                case D3DSIO_M3x3:
+                case D3DSIO_M3x4:
+                case D3DSIO_M4x3:
+                case D3DSIO_M4x4:
+                    Spew( SPEW_INSTRUCTION_ERROR, m_pCurrInst, "Cannot swizzle second source parameter to vector*matrix instructions.");
+                    m_ErrorCount++;
+                    bFoundSrcError = TRUE;        
+                    break;
+                }
             }
         }
 
@@ -1066,7 +1154,7 @@ BOOL CVShaderValidator::Rule_ValidSrcParams()  // could break this down for more
 //-----------------------------------------------------------------------------
 BOOL CVShaderValidator::Rule_SrcInitialized()
 {
-    DSTPARAM* pDstParam = &(m_pCurrInst->m_DstParam[0]);
+    DSTPARAM* pDstParam = &(m_pCurrInst->m_DstParam);
 
     for( UINT i = 0; i < m_pCurrInst->m_SrcParamCount; i++ )
     {
@@ -1075,7 +1163,7 @@ BOOL CVShaderValidator::Rule_SrcInitialized()
         CRegisterFile* pRegFile = NULL;
         char* RegChar = NULL;
         UINT NumConsecutiveRegistersUsed = 1; // more than one for matrix mul macros.
-        CAccessHistoryNode* pWriterInCurrCycle[4] = {0, 0, 0, 0};
+        DWORD RelativeAddrComponent = 0;
 
         if( m_bSrcParamError[i] ) continue;
 
@@ -1089,77 +1177,59 @@ BOOL CVShaderValidator::Rule_SrcInitialized()
                 pRegFile = m_pInputRegFile; 
                 RegChar = "v";
                 break;
-            case D3DSPR_CONST:
-                // if this is an address register read, check that the address register is initialized
-                if(pSrcParam->m_AddressMode == D3DVS_ADDRMODE_RELATIVE) {
-                    CAccessHistoryNode* pPreviousWriter = m_pAddrRegFile->m_pAccessHistory[0][0].m_pMostRecentWriter;
-
-                    // If co-issue, find the real previous writer.
-                    while( pPreviousWriter
-                           && pPreviousWriter->m_pInst->m_CycleNum == m_pCurrInst->m_CycleNum )
-                    {
-                        pPreviousWriter = pPreviousWriter->m_pPreviousWriter;
-                    }
-                    if(NULL == pPreviousWriter){
-                        Spew( SPEW_INSTRUCTION_ERROR, m_pCurrInst, "Read of uninitialized A0.x");
-                        m_ErrorCount++;
-                    }
+            case D3DSPR_CONST:    
+                if( D3DVS_ADDRMODE_RELATIVE == pSrcParam->m_AddressMode )
+                {
+                    // make sure a0 was initialized.
+                    pRegFile = m_pAddrRegFile;
+                    RegChar = "a";
+                    RegNum = 0;
+                    RelativeAddrComponent = pSrcParam->m_RelativeAddrComponent;
+                    break;
                 }
                 continue; // no validation for const register reads (no need to update access history either).
-                // but we still need to check the other arguments.
         }
         if( !pRegFile ) continue;
 
-        switch( m_pCurrInst->m_Type )
+        if( 1 == i )
         {
-            case D3DSIO_M3x2:
-                if( 1 == i )        NumConsecutiveRegistersUsed = 2;
-                break;
-            case D3DSIO_M3x3:
-                if( 1 == i )        NumConsecutiveRegistersUsed = 3;
-                break;
-            case D3DSIO_M3x4:
-                if( 1 == i )        NumConsecutiveRegistersUsed = 4;
-                break;
-            case D3DSIO_M4x3:
-                if( 1 == i )        NumConsecutiveRegistersUsed = 3;
-                break;
-            case D3DSIO_M4x4:
-                if( 1 == i )        NumConsecutiveRegistersUsed = 4;
-                break;
-            case D3DSIO_NOP:
-            default:
-                break;
+            switch( m_pCurrInst->m_Type )
+            {
+                case D3DSIO_M3x2:
+                    NumConsecutiveRegistersUsed = 2;
+                    break;
+                case D3DSIO_M3x3:
+                    NumConsecutiveRegistersUsed = 3;
+                    break;
+                case D3DSIO_M3x4:
+                    NumConsecutiveRegistersUsed = 4;
+                    break;
+                case D3DSIO_M4x3:
+                    NumConsecutiveRegistersUsed = 3;
+                    break;
+                case D3DSIO_M4x4:
+                    NumConsecutiveRegistersUsed = 4;
+                    break;
+            }
         }
-
         // check for read of uninitialized components
-        for( UINT j = 0; j < NumConsecutiveRegistersUsed; j++ ) // will loop for macro matrix instructions
+        for( UINT j = 0; j < (RelativeAddrComponent?1:NumConsecutiveRegistersUsed); j++ ) // will loop for macro matrix instructions
         {
             DWORD  UninitializedComponentsMask = 0;
             UINT   NumUninitializedComponents = 0;
 
             for( UINT k = 0; k < 4; k++ )
             {
-                if( pSrcParam->m_ComponentReadMask & COMPONENT_MASKS[k] )
+                if( (RelativeAddrComponent ? RelativeAddrComponent : pSrcParam->m_ComponentReadMask) & COMPONENT_MASKS[k] )
                 {
-
-                    CAccessHistoryNode* pPreviousWriter = pRegFile->m_pAccessHistory[k][RegNum].m_pMostRecentWriter;
-
-                    // If co-issue, find the real previous writer.
-                    while( pPreviousWriter
-                           && pPreviousWriter->m_pInst->m_CycleNum == m_pCurrInst->m_CycleNum )
-                    {
-                        pWriterInCurrCycle[k] = pPreviousWriter; // log read just before this write for co-issue
-                        pPreviousWriter = pPreviousWriter->m_pPreviousWriter;
-                    }
-
-                    if( NULL == pPreviousWriter &&
+                    if( NULL == pRegFile->m_pAccessHistory[k][RegNum + j].m_pMostRecentWriter &&
                         !pRegFile->m_pAccessHistory[k][RegNum + j].m_bPreShaderInitialized )
                     {
                         NumUninitializedComponents++;
                         UninitializedComponentsMask |= COMPONENT_MASKS[k];
                     }
                 }
+
             }
 
             if( NumUninitializedComponents )
@@ -1174,29 +1244,14 @@ BOOL CVShaderValidator::Rule_SrcInitialized()
             // Multiple reads of the same register component by the current instruction
             // will only be logged as one read in the access history.
 
+            for( UINT k = 0; k < 4; k++ )
             {
-                for( UINT k = 0; k < 4; k++ )
+                #define PREV_READER(_CHAN,_REG) \
+                        ((NULL == pRegFile->m_pAccessHistory[_CHAN][_REG].m_pMostRecentReader) ? NULL :\
+                        pRegFile->m_pAccessHistory[_CHAN][_REG].m_pMostRecentReader->m_pInst)
+                if((RelativeAddrComponent ? RelativeAddrComponent : pSrcParam->m_ComponentReadMask) & COMPONENT_MASKS[k])
                 {
-                    #define PREV_READER(_CHAN,_REG) \
-                            ((NULL == pRegFile->m_pAccessHistory[_CHAN][_REG].m_pMostRecentReader) ? NULL :\
-                            pRegFile->m_pAccessHistory[_CHAN][_REG].m_pMostRecentReader->m_pInst)
-                    if (!pSrcParam->m_ComponentReadMask & COMPONENT_MASKS[k])
-                        continue;
-
-                    if( NULL != pWriterInCurrCycle[k] )
-                    {
-                        if( !pWriterInCurrCycle[k]->m_pPreviousReader ||
-                            pWriterInCurrCycle[k]->m_pPreviousReader->m_pInst != m_pCurrInst )
-                        {
-                            if( !pRegFile->m_pAccessHistory[k][RegNum].InsertReadBeforeWrite(
-                                                    pWriterInCurrCycle[k], m_pCurrInst ) )
-                            {
-                                Spew( SPEW_GLOBAL_ERROR, NULL, "Out of memory");
-                                m_ErrorCount++;
-                            }
-                        }
-                    }
-                    else if( PREV_READER(k,RegNum) != m_pCurrInst )
+                    if( PREV_READER(k,RegNum) != m_pCurrInst )
                     {
                         if( !pRegFile->m_pAccessHistory[k][RegNum].NewAccess(m_pCurrInst,FALSE) )
                         {
@@ -1226,7 +1281,7 @@ BOOL CVShaderValidator::Rule_SrcInitialized()
 //-----------------------------------------------------------------------------
 BOOL CVShaderValidator::Rule_ValidAddressRegWrite() 
 {
-    DSTPARAM* pDstParam = &(m_pCurrInst->m_DstParam[0]);
+    DSTPARAM* pDstParam = &(m_pCurrInst->m_DstParam);
 
     if( pDstParam->m_bParamUsed )
     {
@@ -1284,7 +1339,7 @@ BOOL CVShaderValidator::Rule_ValidAddressRegWrite()
 BOOL CVShaderValidator::Rule_ValidDstParam() // could break this down for more granularity
 {
     BOOL   bFoundDstError = FALSE;
-    DSTPARAM* pDstParam = &(m_pCurrInst->m_DstParam[0]);
+    DSTPARAM* pDstParam = &(m_pCurrInst->m_DstParam);
     UINT RegNum = pDstParam->m_RegNum;
 
     if( pDstParam->m_bParamUsed )
@@ -1306,10 +1361,6 @@ BOOL CVShaderValidator::Rule_ValidDstParam() // could break this down for more g
             bWritable = m_pRastOutputRegFile->IsWritable(); //(TRUE)
             ValidRegNum = m_pRastOutputRegFile->GetNumRegs();            
             break;
-        case D3DSPR_CONST:    
-            bWritable = m_pConstRegFile->IsWritable();
-            ValidRegNum = m_pConstRegFile->GetNumRegs();                        
-            break;
         case D3DSPR_ATTROUT:    
             bWritable = m_pAttrOutputRegFile->IsWritable(); //(TRUE)
             ValidRegNum = m_pAttrOutputRegFile->GetNumRegs();                        
@@ -1328,8 +1379,7 @@ BOOL CVShaderValidator::Rule_ValidDstParam() // could break this down for more g
         } 
         else if( RegNum >= ValidRegNum )
         {
-            Spew( SPEW_INSTRUCTION_ERROR, m_pCurrInst,
-                "Invalid dest reg num: %d. Max allowed for this reg type is %d.", RegNum, ValidRegNum - 1);
+            Spew( SPEW_INSTRUCTION_ERROR, m_pCurrInst, "Invalid dest reg num: %d. Max allowed for this reg type is %d.", RegNum, ValidRegNum - 1);
             m_ErrorCount++;
             bFoundDstError = TRUE;
         }
@@ -1372,9 +1422,6 @@ BOOL CVShaderValidator::Rule_ValidDstParam() // could break this down for more g
                 break;
             case D3DSPR_ADDR:       
                 pRegFile = m_pAddrRegFile; 
-                break;
-            case D3DSPR_CONST:       
-                pRegFile = m_pConstRegFile; 
                 break;
             case D3DSPR_RASTOUT:    
                 pRegFile = m_pRastOutputRegFile; 
@@ -1427,8 +1474,8 @@ BOOL CVShaderValidator::Rule_ValidFRCInstruction()
 
     if( D3DSIO_FRC == m_pCurrInst->m_Type )
     {
-        if( ( (D3DSP_WRITEMASK_0 | D3DSP_WRITEMASK_1) != m_pCurrInst->m_DstParam[0].m_WriteMask ) &&
-            (                      D3DSP_WRITEMASK_1  != m_pCurrInst->m_DstParam[0].m_WriteMask ) )
+        if( ( (D3DSP_WRITEMASK_0 | D3DSP_WRITEMASK_1) != m_pCurrInst->m_DstParam.m_WriteMask ) &&
+            (                      D3DSP_WRITEMASK_1  != m_pCurrInst->m_DstParam.m_WriteMask ) )
         {
             Spew( SPEW_INSTRUCTION_ERROR, m_pCurrInst, 
                 "The only valid write masks for the FRC instruction are .xy and .y." );
@@ -1446,6 +1493,16 @@ BOOL CVShaderValidator::Rule_ValidFRCInstruction()
 // Each register class (TEMP,TEXTURE,INPUT,CONST) may only appear as parameters
 // in an individual instruction up to a maximum number of times.
 //
+// In additon there is special treatment for constant registers:
+//      - absolute and relative addressing of constants cannot be combined
+//      - relative addressing of constants can be used more than once in an
+//        instruction, as long as each instance is identical
+//
+// For matrix ops, 
+//      - multiple constant registers of any type (including relative offset)
+//        can never be paired as sources 
+//      - multiple input registers (same or different) can never be paired as sources
+//
 // ** When to call:  
 // Per instruction.
 //
@@ -1459,8 +1516,43 @@ BOOL CVShaderValidator::Rule_ValidRegisterPortUsage()
     UINT TempRegAccess[SHADER_INSTRUCTION_MAX_SRCPARAMS];
     UINT InputRegAccessCount = 0;
     UINT InputRegAccess[SHADER_INSTRUCTION_MAX_SRCPARAMS];
-    UINT ConstRegAccessCount = 0;
+    UINT ConstRegAccessCount = 0; // mad r0, c0, c0, c1 counts as *2* const reg accesses
     UINT ConstRegAccess[SHADER_INSTRUCTION_MAX_SRCPARAMS];
+
+    BOOL bMatrixOp = FALSE;
+    BOOL bSeenRelativeAddr = FALSE;
+    UINT SeenRelativeAddrBase = 0;
+    DWORD SeenRelativeAddrComp = 0;
+    BOOL bSeenAbsoluteAddr = FALSE;
+    UINT NumConsecutiveRegistersUsed = 1;
+    UINT NumConstRegs = 0; // mad r0, c0, c0, c1 counts as *3* const reg accesses with this variable
+    UINT NumInputRegs = 0; // mad r0, v0, v0, v1 counts as *3* input reg accesses with this variable
+
+    switch( m_pCurrInst->m_Type )
+    {
+        case D3DSIO_M3x2:
+            NumConsecutiveRegistersUsed = 2;
+            bMatrixOp = TRUE;
+            break;
+        case D3DSIO_M3x3:
+            NumConsecutiveRegistersUsed = 3;
+            bMatrixOp = TRUE;
+            break;
+        case D3DSIO_M3x4:
+            NumConsecutiveRegistersUsed = 4;
+            bMatrixOp = TRUE;
+            break;
+        case D3DSIO_M4x3:
+            NumConsecutiveRegistersUsed = 3;
+            bMatrixOp = TRUE;
+            break;
+        case D3DSIO_M4x4:
+            NumConsecutiveRegistersUsed = 4;
+            bMatrixOp = TRUE;
+            break;
+        default:
+            break;
+    }
 
     for( UINT i = 0; i < SHADER_INSTRUCTION_MAX_SRCPARAMS; i++ )
     {
@@ -1480,12 +1572,45 @@ BOOL CVShaderValidator::Rule_ValidRegisterPortUsage()
             pAccess = TempRegAccess;
             break;
         case D3DSPR_INPUT:
+            NumInputRegs++;
             pCount = &InputRegAccessCount;
             pAccess = InputRegAccess;
             break;
         case D3DSPR_CONST:
+            NumConstRegs++;
             pCount = &ConstRegAccessCount;
             pAccess = ConstRegAccess;
+
+            if( D3DVS_ADDRMODE_RELATIVE == m_pCurrInst->m_SrcParam[i].m_AddressMode )
+            {
+                if( bSeenAbsoluteAddr )
+                {
+                    Spew( SPEW_INSTRUCTION_ERROR, m_pCurrInst, 
+                        "Absolute and relative addressing of constant registers cannot be combined in one instruction.");
+                    m_ErrorCount++;        
+                }
+                else if( bSeenRelativeAddr && 
+                        ((SeenRelativeAddrBase != RegNum) || (SeenRelativeAddrComp != m_pCurrInst->m_SrcParam[i].m_RelativeAddrComponent)))
+                {
+                    Spew( SPEW_INSTRUCTION_ERROR, m_pCurrInst, 
+                        "Different relative addressing of constant registers cannot be combined in one instruction.");
+                    m_ErrorCount++;                            
+                }
+
+                bSeenRelativeAddr = TRUE;
+                SeenRelativeAddrBase = RegNum;
+                SeenRelativeAddrComp = m_pCurrInst->m_SrcParam[i].m_RelativeAddrComponent;
+            }
+            else
+            {
+                if( bSeenRelativeAddr )
+                {
+                    Spew( SPEW_INSTRUCTION_ERROR, m_pCurrInst, 
+                        "Absolute and relative addressing of constant registers cannot be combined in one instruction.");
+                    m_ErrorCount++;        
+                }
+                bSeenAbsoluteAddr = TRUE;
+            }
             break;
         }
 
@@ -1510,23 +1635,37 @@ BOOL CVShaderValidator::Rule_ValidRegisterPortUsage()
 
     if( TempRegAccessCount > m_pTempRegFile->GetNumReadPorts() )
     {
-        Spew( SPEW_INSTRUCTION_ERROR, m_pCurrInst, "Temp registers (r#) read %d times in one instruction.  Max #reads/instruction is %d.",
+        Spew( SPEW_INSTRUCTION_ERROR, m_pCurrInst, "%d different temp registers (r#) read by instruction.  Max. different temp registers readable per instruction is %d.",
                         TempRegAccessCount,  m_pTempRegFile->GetNumReadPorts());
         m_ErrorCount++;        
     }
 
     if( InputRegAccessCount > m_pInputRegFile->GetNumReadPorts() )
     {
-        Spew( SPEW_INSTRUCTION_ERROR, m_pCurrInst, "Input registers (v#) read %d times by instruction.  Max #reads/instruction is %d.",
+        Spew( SPEW_INSTRUCTION_ERROR, m_pCurrInst, "%d different input registers (v#) read by instruction.  Max. different input registers readable per instruction is %d.",
                         InputRegAccessCount,  m_pInputRegFile->GetNumReadPorts());
         m_ErrorCount++;        
     }
 
     if( ConstRegAccessCount > m_pConstRegFile->GetNumReadPorts() )
     {
-        Spew( SPEW_INSTRUCTION_ERROR, m_pCurrInst, "Constant registers (c#) read %d times by instruction.  Max #reads/instruction is %d.",
+        Spew( SPEW_INSTRUCTION_ERROR, m_pCurrInst, "%d different constant registers (c#) read by instruction.  Max. different constant registers readable per instruction is %d.",
                         ConstRegAccessCount, m_pConstRegFile->GetNumReadPorts());
         m_ErrorCount++;        
+    }
+
+    if( bMatrixOp )
+    {
+        if(1 < NumConstRegs)
+        {
+            Spew( SPEW_INSTRUCTION_ERROR, m_pCurrInst, "Multiple constant registers cannot be read by a matrix op.");
+            m_ErrorCount++;        
+        }
+        if(1 < NumInputRegs)
+        {
+            Spew( SPEW_INSTRUCTION_ERROR, m_pCurrInst, "Multiple input registers cannot be read by a matrix op.");
+            m_ErrorCount++;        
+        }
     }
 
     return TRUE;
@@ -1551,13 +1690,6 @@ BOOL CVShaderValidator::Rule_ValidInstructionCount()
 {
     static UINT s_OpCount;
     static UINT s_MaxTotalOpCount;
-
-    if(!m_pCurrInst){
-        // No instructions
-        Spew( SPEW_GLOBAL_ERROR, NULL, "Vertex shader must contain at least one instruction.");
-        m_ErrorCount++;
-        return TRUE; 
-    }
 
     if( NULL == m_pCurrInst->m_pPrevInst )   // First instruction - initialize static vars
     {
@@ -1607,7 +1739,7 @@ BOOL CVShaderValidator::Rule_ValidInstructionCount()
         s_OpCount += 1; break;
     case D3DSIO_M3x2:
         s_OpCount += 2; break;
-    case D3DSIO_FRC: //todo: if output is only .y, frc expands to only 1 instruction, not 3
+    case D3DSIO_FRC:
     case D3DSIO_M3x3:
     case D3DSIO_M4x3:
         s_OpCount += 3; break;
@@ -1616,7 +1748,7 @@ BOOL CVShaderValidator::Rule_ValidInstructionCount()
         s_OpCount += 4; break;
     case D3DSIO_EXP:
     case D3DSIO_LOG:
-        s_OpCount += 2; break;
+        s_OpCount += 10; break;
     }
     
     return TRUE;
@@ -1653,53 +1785,14 @@ BOOL CVShaderValidator::Rule_oPosWritten()
         Spew( SPEW_GLOBAL_ERROR, NULL, "Vertex shader must minimally write first two (x,y) components of oPos output register.  Affected component%s(*): %s",
             NumUninitializedComponents > 1 ? "s" : "", MakeAffectedComponentsText(UninitializedComponentsMask,FALSE,TRUE));
         m_ErrorCount++;
-    }
+    } 
     else if( 2 == NumUninitializedComponents )
     {
         Spew( SPEW_GLOBAL_ERROR, NULL, "Vertex shader must minimally write first two (x,y) components of oPos output register.");
         m_ErrorCount++;
     }
+
     return TRUE;
-}
-
-//-----------------------------------------------------------------------------
-// CVShaderValidator::DecodeDstParam
-//-----------------------------------------------------------------------------
-void CVShaderValidator::DecodeDstParam( D3DSHADER_INSTRUCTION_OPCODE_TYPE inst, DSTPARAM* pDstParam, DWORD Token )
-{
-    DXGASSERT(pDstParam);
-    pDstParam->m_bParamUsed = TRUE;
-    pDstParam->m_RegNum = Token & D3DSP_REGNUM_MASK;
-    pDstParam->m_WriteMask = Token & D3DSP_WRITEMASK_ALL;
-    pDstParam->m_DstMod = (D3DSHADER_PARAM_DSTMOD_TYPE)(Token & D3DSP_DSTMOD_MASK);
-    pDstParam->m_DstShift = (DSTSHIFT)((Token & D3DSP_DSTSHIFT_MASK) >> D3DSP_DSTSHIFT_SHIFT );
-    pDstParam->m_RegType = (D3DSHADER_PARAM_REGISTER_TYPE)(Token & D3DSP_REGTYPE_MASK);
-
-	switch (inst) {
-	case D3DSIO_M4x3:
-	case D3DSIO_M3x3:
-		pDstParam->m_WriteMask &= D3DSP_WRITEMASK_0 | D3DSP_WRITEMASK_1 | D3DSP_WRITEMASK_2;
-		break;
-	case D3DSIO_M3x2:
-		pDstParam->m_WriteMask &= D3DSP_WRITEMASK_0 | D3DSP_WRITEMASK_1;
-		break;
-	}
-
-}
-
-//-----------------------------------------------------------------------------
-// CVShaderValidator::DecodeSrcParam
-//-----------------------------------------------------------------------------
-void CVShaderValidator::DecodeSrcParam( SRCPARAM* pSrcParam, DWORD Token )
-{
-    DXGASSERT(pSrcParam);
-    pSrcParam->m_bParamUsed = TRUE;
-    pSrcParam->m_RegNum = Token & D3DSP_REGNUM_MASK;
-    pSrcParam->m_SwizzleShift = Token & D3DSP_SWIZZLE_MASK;
-    pSrcParam->m_AddressMode = (D3DVS_ADDRESSMODE_TYPE)(Token & D3DVS_ADDRESSMODE_MASK);
-    pSrcParam->m_RelativeAddrComponent = COMPONENT_MASKS[(Token >> 14) & 0x3];
-    pSrcParam->m_SrcMod = (D3DSHADER_PARAM_SRCMOD_TYPE)(Token & D3DSP_SRCMOD_MASK);
-    pSrcParam->m_RegType = (D3DSHADER_PARAM_REGISTER_TYPE)(Token & D3DSP_REGTYPE_MASK);
 }
 
 //-----------------------------------------------------------------------------
@@ -1722,14 +1815,15 @@ BOOL ValidateVertexShaderInternal(   const DWORD* pCode,
 //-----------------------------------------------------------------------------
 // ValidateVertexShader
 //
+// Don't forget to call "free" on the buffer returned in ppBuf.
 //-----------------------------------------------------------------------------
 HRESULT WINAPI ValidateVertexShader(    const DWORD* pCode, 
                                         const DWORD* pDecl,
                                         const D3DCAPS8* pCaps, 
-                                        const DWORD Flags )
+                                        const DWORD Flags, 
+                                        char** const ppBuf )
 {
     CVShaderValidator Validator(pCode,pDecl,pCaps,Flags);
-#if 0
     if( ppBuf )
     {
         *ppBuf = (char*)HeapAlloc(GetProcessHeap(), 0, Validator.GetRequiredLogBufferSize());
@@ -1738,6 +1832,5 @@ HRESULT WINAPI ValidateVertexShader(    const DWORD* pCode,
         else
             Validator.WriteLogToBuffer(*ppBuf);
     }
-#endif
     return Validator.GetStatus();
 }

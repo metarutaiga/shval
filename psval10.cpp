@@ -7,6 +7,7 @@
 //
 ///////////////////////////////////////////////////////////////////////////////
 #include "pch.cpp"
+#pragma hdrstop
 
 // Use these macros when looking at CPSInstruction derived members of the current instruction (CBaseInstruction)
 #define _CURR_PS_INST   ((CPSInstruction*)m_pCurrInst)
@@ -75,23 +76,37 @@
 // PS.1.1-4:        Rule_SrcNoLongerAvailable
 // PS.1.1-5:        Rule_SrcNoLongerAvailable
 // PS.1.1-6:        Rule_ValidDstParam
+// PS.1.1-7:        Rule_NegateAfterSat
 // PS.1.1-8:        Rule_MultipleDependentTextureReads
 // PS.1.1-9:        <not validated - implemented by refrast though>
-//
-// Pixel Shader Version 255.255 Rules
-// ----------------------------------
-//
-// PS.255.255-1:    Rule_ValidTEXM3xSequence, Rule_ValidTEXM3xRegisterNumbers, Rule_InstructionSupportedByVersion
-// PS.255.255-2:    Rule_TexOpAfterNonTexOp, Rule_TexRegsDeclaredInOrder
-// PS.255.255-3:    Rule_ValidCNDInstruction
-// PS.255.255-4:    <not validated - implemented by refrast though>
 //
 //-----------------------------------------------------------------------------
 
 //-----------------------------------------------------------------------------
-// CPShaderValidator::IsCurrInstTexOp
+// CPShaderValidator10::CPShaderValidator10
 //-----------------------------------------------------------------------------
-void CPShaderValidator::IsCurrInstTexOp()
+CPShaderValidator10::CPShaderValidator10(   const DWORD* pCode,
+                                        const D3DCAPS8* pCaps,
+                                        DWORD Flags )
+                                        : CBasePShaderValidator( pCode, pCaps, Flags )
+{
+    // Note that the base constructor initialized m_ReturnCode to E_FAIL.
+    // Only set m_ReturnCode to S_OK if validation has succeeded,
+    // before exiting this constructor.
+
+    m_TexMBaseDstReg        = 0;
+
+    if( !m_bBaseInitOk )
+        return;
+
+    ValidateShader(); // If successful, m_ReturnCode will be set to S_OK.
+                      // Call GetStatus() on this object to determine validation outcome.
+}
+
+//-----------------------------------------------------------------------------
+// CPShaderValidator10::IsCurrInstTexOp
+//-----------------------------------------------------------------------------
+void CPShaderValidator10::IsCurrInstTexOp()
 {
     DXGASSERT(m_pCurrInst);
 
@@ -99,11 +114,12 @@ void CPShaderValidator::IsCurrInstTexOp()
     {
     case D3DSIO_TEXM3x2PAD:
     case D3DSIO_TEXM3x2TEX:
+    case D3DSIO_TEXM3x2DEPTH:
     case D3DSIO_TEXM3x3PAD:
     case D3DSIO_TEXM3x3TEX:
-    case D3DSIO_TEXM3x3DIFF:
     case D3DSIO_TEXM3x3SPEC:
     case D3DSIO_TEXM3x3VSPEC:
+    case D3DSIO_TEXM3x3:
         _CURR_PS_INST->m_bTexMOp = TRUE;
         // fall through
     case D3DSIO_TEXCOORD:
@@ -111,10 +127,11 @@ void CPShaderValidator::IsCurrInstTexOp()
     case D3DSIO_TEX:
     case D3DSIO_TEXBEM:
     case D3DSIO_TEXBEML:
-    case D3DSIO_TEXBEM_LEGACY:
-    case D3DSIO_TEXBEML_LEGACY:
     case D3DSIO_TEXREG2AR:
     case D3DSIO_TEXREG2GB:
+    case D3DSIO_TEXDP3:
+    case D3DSIO_TEXDP3TEX:
+    case D3DSIO_TEXREG2RGB:
         _CURR_PS_INST->m_bTexOp = TRUE;
         break;
     }
@@ -123,31 +140,33 @@ void CPShaderValidator::IsCurrInstTexOp()
     {
     case D3DSIO_TEXM3x2PAD:
     case D3DSIO_TEXM3x3PAD:
+    case D3DSIO_TEXM3x2DEPTH:
     case D3DSIO_TEXCOORD:
     case D3DSIO_TEXKILL:
+    case D3DSIO_TEXDP3:
+    case D3DSIO_TEXM3x3:
         _CURR_PS_INST->m_bTexOpThatReadsTexture = FALSE;
         break;
     case D3DSIO_TEX:
-    case D3DSIO_TEXM3x3DIFF:
     case D3DSIO_TEXM3x2TEX:
     case D3DSIO_TEXM3x3TEX:
     case D3DSIO_TEXM3x3SPEC:
     case D3DSIO_TEXM3x3VSPEC:
     case D3DSIO_TEXBEM:
     case D3DSIO_TEXBEML:
-    case D3DSIO_TEXBEM_LEGACY:
-    case D3DSIO_TEXBEML_LEGACY:
     case D3DSIO_TEXREG2AR:
     case D3DSIO_TEXREG2GB:
+    case D3DSIO_TEXREG2RGB:
+    case D3DSIO_TEXDP3TEX:
         _CURR_PS_INST->m_bTexOpThatReadsTexture = TRUE;
         break;
     }
 }
 
 //-----------------------------------------------------------------------------
-// CPShaderValidator::InitValidation
+// CPShaderValidator10::InitValidation
 //-----------------------------------------------------------------------------
-BOOL CPShaderValidator::InitValidation()
+BOOL CPShaderValidator10::InitValidation()
 {
     switch( m_Version >> 16 )
     {
@@ -165,8 +184,7 @@ BOOL CPShaderValidator::InitValidation()
 
     if( m_pCaps )
     {
-        if( (m_pCaps->PixelShaderVersion & 0x0000FFFF) < (m_Version & 0x0000FFFF)
-            && !(m_Version == D3DPS_VERSION(0xff,0xff))) // not a 255.255 shader - that is always allowed
+        if( (m_pCaps->PixelShaderVersion & 0x0000FFFF) < (m_Version & 0x0000FFFF) ) 
         {
             Spew( SPEW_GLOBAL_ERROR, NULL, "Version Token: Pixel shader version %d.%d is too high for device.  Maximum supported version is %d.%d. Aborting shader validation.",
                     D3DSHADER_VERSION_MAJOR(m_Version),D3DSHADER_VERSION_MINOR(m_Version),
@@ -177,29 +195,24 @@ BOOL CPShaderValidator::InitValidation()
 
     switch(m_Version)
     {
-    case D3DPS_VERSION(1,0):    // DX7.5
-        m_pTempRegFile      = new CRegisterFile(2,TRUE,2); // #regs, bWritable, max# reads/instruction
-        m_pInputRegFile     = new CRegisterFile(2,FALSE,1);
-        m_pConstRegFile     = new CRegisterFile(8,FALSE,2);
-        m_pTextureRegFile   = new CRegisterFile(4,FALSE,2);
+    case D3DPS_VERSION(1,0):    // DX8.0
+        m_pTempRegFile      = new CRegisterFile(2,TRUE,2,FALSE); // #regs, bWritable, max# reads/instruction, pre-shader initialized
+        m_pInputRegFile     = new CRegisterFile(2,FALSE,1,TRUE);
+        m_pConstRegFile     = new CRegisterFile(8,FALSE,2,TRUE);
+        m_pTextureRegFile   = new CRegisterFile(4,FALSE,1,FALSE);
         break;
     case D3DPS_VERSION(1,1):    // DX8.0
-        m_pTempRegFile      = new CRegisterFile(2,TRUE,2); // #regs, bWritable, max# reads/instruction
-        m_pInputRegFile     = new CRegisterFile(2,FALSE,2);
-        m_pConstRegFile     = new CRegisterFile(16,FALSE,2);
-        m_pTextureRegFile   = new CRegisterFile(4,TRUE,2);
+        m_pTempRegFile      = new CRegisterFile(2,TRUE,2,FALSE); // #regs, bWritable, max# reads/instruction, pre-shader initialized
+        m_pInputRegFile     = new CRegisterFile(2,FALSE,2,TRUE);
+        m_pConstRegFile     = new CRegisterFile(8,FALSE,2,TRUE);
+        m_pTextureRegFile   = new CRegisterFile(4,TRUE,2,FALSE);
         break;
-    case D3DPS_VERSION(254,254):  // Legacy shader
-        m_pTempRegFile      = new CRegisterFile(2,TRUE,5); // #regs, bWritable, max# reads/instruction
-        m_pInputRegFile     = new CRegisterFile(2,TRUE,5);
-        m_pConstRegFile     = new CRegisterFile(2,TRUE,5);
-        m_pTextureRegFile   = new CRegisterFile(8,TRUE,5); // 5 is just arbitrarily large value
-        break;
-    case D3DPS_VERSION(255,255):
-        m_pTempRegFile      = new CRegisterFile(6,TRUE,2); // #regs, bWritable, max# reads/instruction
-        m_pInputRegFile     = new CRegisterFile(8,FALSE,2);
-        m_pConstRegFile     = new CRegisterFile(16,FALSE,2);
-        m_pTextureRegFile   = new CRegisterFile(8,TRUE,2);
+    case D3DPS_VERSION(1,2):    // DX8.1
+    case D3DPS_VERSION(1,3):    // DX8.1
+        m_pTempRegFile      = new CRegisterFile(2,TRUE,2,FALSE); // #regs, bWritable, max# reads/instruction, pre-shader initialized
+        m_pInputRegFile     = new CRegisterFile(2,FALSE,2,TRUE);
+        m_pConstRegFile     = new CRegisterFile(8,FALSE,2,TRUE);
+        m_pTextureRegFile   = new CRegisterFile(4,TRUE,3,FALSE);
         break;
     default:
         Spew( SPEW_GLOBAL_ERROR, NULL, "Version Token: %d.%d is not a supported pixel shader version. Aborting pixel shader validation.",
@@ -215,34 +228,16 @@ BOOL CPShaderValidator::InitValidation()
         return FALSE;
     }
 
-    // The CRegisterFile constructor assumes its registers are initialized if
-    // !bWritable && NumReadPorts > 0 is passed into the constructor above.
-    // This is a valid assumption in most cases - e.g. input and const register files.
-    //
-    // This is not a correct assumption for texture registers.  Tex ops can always write to
-    // texture regsters, regardless of what bWritable is set to.  In this case, bWritable is meant
-    // to indicate whether blend ops can write the register.
-    //
-    // We never want to assume texture registers are initialized pre-shader, so below
-    // they are set to uninitialized.
-    for( UINT i = 0; i < m_pTextureRegFile->GetNumRegs(); i++ )
-    {
-        for( UINT Component = 0; Component < 4; Component++ )
-        {
-            m_pTextureRegFile->m_pAccessHistory[Component][i].m_bPreShaderInitialized = FALSE;
-        }
-    }
-
     return TRUE;
 }
 
 //-----------------------------------------------------------------------------
-// CPShaderValidator::ApplyPerInstructionRules
+// CPShaderValidator10::ApplyPerInstructionRules
 //
 // Returns FALSE if shader validation must terminate.
 // Returns TRUE if validation may proceed to next instruction.
 //-----------------------------------------------------------------------------
-BOOL CPShaderValidator::ApplyPerInstructionRules()
+BOOL CPShaderValidator10::ApplyPerInstructionRules()
 {
     if( !   Rule_InstructionRecognized()            ) return FALSE;   // Bail completely on unrecognized instr.
     if( !   Rule_InstructionSupportedByVersion()    ) goto EXIT;
@@ -250,6 +245,8 @@ BOOL CPShaderValidator::ApplyPerInstructionRules()
 
    // Rules that examine source parameters
     if( !   Rule_ValidSrcParams()                   ) goto EXIT;
+    if( !   Rule_NegateAfterSat()                   ) goto EXIT;
+    if( !   Rule_SatBeforeBiasOrComplement()        ) goto EXIT; // needs to be after _ValidSrcParams(), and before _ValidDstParam(), _SrcInitialized()
     if( !   Rule_MultipleDependentTextureReads()    ) goto EXIT; // needs to be after _ValidSrcParams(), and before _ValidDstParam(), _SrcInitialized()
     if( !   Rule_SrcNoLongerAvailable()             ) goto EXIT; // needs to be after _ValidSrcParams(), and before _ValidDstParam(), _SrcInitialized()
     if( !   Rule_SrcInitialized()                   ) goto EXIT; // needs to be before _ValidDstParam()
@@ -261,9 +258,11 @@ BOOL CPShaderValidator::ApplyPerInstructionRules()
     if( !   Rule_ValidTEXM3xSequence()              ) goto EXIT;
     if( !   Rule_ValidTEXM3xRegisterNumbers()       ) goto EXIT;
     if( !   Rule_ValidCNDInstruction()              ) goto EXIT;
+    if( !   Rule_ValidCMPInstruction()              ) goto EXIT;
     if( !   Rule_ValidLRPInstruction()              ) goto EXIT;
     if( !   Rule_ValidDEFInstruction()              ) goto EXIT;
     if( !   Rule_ValidDP3Instruction()              ) goto EXIT;
+    if( !   Rule_ValidDP4Instruction()              ) goto EXIT;
     if( !   Rule_ValidInstructionPairing()          ) goto EXIT;
     if( !   Rule_ValidInstructionCount()            ) goto EXIT;
 EXIT:
@@ -271,9 +270,9 @@ EXIT:
 }
 
 //-----------------------------------------------------------------------------
-// CPShaderValidator::ApplyPostInstructionsRules
+// CPShaderValidator10::ApplyPostInstructionsRules
 //-----------------------------------------------------------------------------
-void CPShaderValidator::ApplyPostInstructionsRules()
+void CPShaderValidator10::ApplyPostInstructionsRules()
 {
     Rule_ValidTEXM3xSequence(); // check once more to see if shader ended dangling in mid-sequence
     Rule_ValidInstructionCount(); // see if we went over the limits
@@ -287,7 +286,7 @@ void CPShaderValidator::ApplyPostInstructionsRules()
 //-----------------------------------------------------------------------------
 
 //-----------------------------------------------------------------------------
-// CPShaderValidator::Rule_InstructionRecognized
+// CPShaderValidator10::Rule_InstructionRecognized
 //
 // ** Rule:
 // Is the instruction opcode known? (regardless of shader version)
@@ -299,7 +298,7 @@ void CPShaderValidator::ApplyPostInstructionsRules()
 // FALSE when instruction not recognized.
 //
 //-----------------------------------------------------------------------------
-BOOL CPShaderValidator::Rule_InstructionRecognized()
+BOOL CPShaderValidator10::Rule_InstructionRecognized()
 {
     switch(m_pCurrInst->m_Type)
     {
@@ -311,8 +310,6 @@ BOOL CPShaderValidator::Rule_InstructionRecognized()
     case D3DSIO_LRP:
     case D3DSIO_DP3:
     case D3DSIO_TEX:
-    case D3DSIO_TEXBEM_LEGACY:
-    case D3DSIO_TEXBEML_LEGACY:
     case D3DSIO_TEXBEM:
     case D3DSIO_TEXBEML:
     case D3DSIO_CND:
@@ -321,7 +318,6 @@ BOOL CPShaderValidator::Rule_InstructionRecognized()
     case D3DSIO_TEXM3x2TEX:
     case D3DSIO_TEXM3x3PAD:
     case D3DSIO_TEXM3x3TEX:
-    case D3DSIO_TEXM3x3DIFF:
     case D3DSIO_TEXM3x3SPEC:
     case D3DSIO_TEXM3x3VSPEC:
     case D3DSIO_TEXREG2AR:
@@ -330,7 +326,16 @@ BOOL CPShaderValidator::Rule_InstructionRecognized()
     case D3DSIO_END:
     case D3DSIO_NOP:
     case D3DSIO_DEF:
+    case D3DSIO_TEXM3x2DEPTH:
+    case D3DSIO_TEXDP3:
+    case D3DSIO_TEXREG2RGB:
     case D3DSIO_DP4:
+    case D3DSIO_CMP:
+    case D3DSIO_TEXDP3TEX:
+    case D3DSIO_TEXM3x3:
+    case D3DSIO_TEXDEPTH:
+    case D3DSIO_BEM:
+    case D3DSIO_PHASE:
         return TRUE; // instruction recognized - ok.
     }
 
@@ -341,7 +346,7 @@ BOOL CPShaderValidator::Rule_InstructionRecognized()
 }
 
 //-----------------------------------------------------------------------------
-// CPShaderValidator::Rule_InstructionSupportedByVersion
+// CPShaderValidator10::Rule_InstructionSupportedByVersion
 //
 // ** Rule:
 // Is the instruction supported by the current pixel shader version?
@@ -353,62 +358,57 @@ BOOL CPShaderValidator::Rule_InstructionRecognized()
 // FALSE when instruction not supported by version.
 //
 //-----------------------------------------------------------------------------
-BOOL CPShaderValidator::Rule_InstructionSupportedByVersion()
+BOOL CPShaderValidator10::Rule_InstructionSupportedByVersion()
 {
-    if( D3DPS_VERSION(0xfe,0xfe) == m_Version )
+    if( D3DPS_VERSION(1,0) <= m_Version ) // 1.0 and above
     {
-    // Special case - instructions used in legacy pixel processing by refdev.
-    // Note that D3DSIO_TEX shows up below under 0.5 as well.
-
         switch(m_pCurrInst->m_Type)
         {
+        case D3DSIO_MOV:
+        case D3DSIO_ADD:
+        case D3DSIO_SUB:
+        case D3DSIO_MUL:
+        case D3DSIO_MAD:
+        case D3DSIO_LRP:
+        case D3DSIO_DP3:
         case D3DSIO_TEX:
-        case D3DSIO_TEXBEM_LEGACY:
-        case D3DSIO_TEXBEML_LEGACY:
+        case D3DSIO_DEF:
+        case D3DSIO_TEXBEM:
+        case D3DSIO_TEXBEML:
+        case D3DSIO_CND:
+        case D3DSIO_TEXKILL:
+        case D3DSIO_TEXCOORD:
+        case D3DSIO_TEXM3x2PAD:
+        case D3DSIO_TEXM3x2TEX:
+        case D3DSIO_TEXM3x3PAD:
+        case D3DSIO_TEXM3x3TEX:
+        case D3DSIO_TEXM3x3SPEC:
+        case D3DSIO_TEXM3x3VSPEC:
+        case D3DSIO_TEXREG2AR:
+        case D3DSIO_TEXREG2GB:
             return TRUE; // instruction supported - ok.
         }
     }
-    else // "real" instructions
+    if( D3DPS_VERSION(1,2) <= m_Version ) // 1.2 and above
     {
-        if( D3DPS_VERSION(1,0) <= m_Version ) // 1.0 and above
+        switch(m_pCurrInst->m_Type)
         {
-            switch(m_pCurrInst->m_Type)
-            {
-            case D3DSIO_MOV:
-            case D3DSIO_ADD:
-            case D3DSIO_SUB:
-            case D3DSIO_MUL:
-            case D3DSIO_MAD:
-            case D3DSIO_LRP:
-            case D3DSIO_DP3:
-            case D3DSIO_TEX:
-            case D3DSIO_DEF:
-            case D3DSIO_TEXBEM:
-            case D3DSIO_TEXBEML:
-            case D3DSIO_CND:
-            case D3DSIO_TEXKILL:
-            case D3DSIO_TEXCOORD:
-            case D3DSIO_TEXM3x2PAD:
-            case D3DSIO_TEXM3x2TEX:
-            case D3DSIO_TEXM3x3PAD:
-            case D3DSIO_TEXM3x3TEX:
-            case D3DSIO_TEXM3x3SPEC:
-            case D3DSIO_TEXM3x3DIFF:
-            case D3DSIO_TEXM3x3VSPEC:
-            case D3DSIO_TEXREG2AR:
-            case D3DSIO_TEXREG2GB:
-                return TRUE; // instruction supported - ok.
-            }
+        case D3DSIO_CMP:
+        case D3DSIO_DP4:
+        case D3DSIO_TEXDP3:
+        case D3DSIO_TEXDP3TEX:
+        case D3DSIO_TEXM3x3:
+        case D3DSIO_TEXREG2RGB:
+            return TRUE; // instruction supported - ok.
         }
+    }
 
-        if( D3DPS_VERSION(255,255) == m_Version )
+    if( D3DPS_VERSION(1,3) <= m_Version ) // 1.3
+    {
+        switch(m_pCurrInst->m_Type)
         {
-            switch(m_pCurrInst->m_Type)
-            {
-            case D3DSIO_TEXM3x3DIFF:
-            case D3DSIO_DP4:
-                return TRUE; // instruction supported - ok.
-            }
+        case D3DSIO_TEXM3x2DEPTH:
+            return TRUE; // instruction supported - ok.
         }
     }
 
@@ -427,7 +427,7 @@ BOOL CPShaderValidator::Rule_InstructionSupportedByVersion()
 }
 
 //-----------------------------------------------------------------------------
-// CPShaderValidator::Rule_ValidParamCount
+// CPShaderValidator10::Rule_ValidParamCount
 //
 // ** Rule:
 // Is the parameter count correct for the instruction?
@@ -445,7 +445,7 @@ BOOL CPShaderValidator::Rule_InstructionSupportedByVersion()
 // FALSE when the parameter count is incorrect.
 //
 //-----------------------------------------------------------------------------
-BOOL CPShaderValidator::Rule_ValidParamCount()
+BOOL CPShaderValidator10::Rule_ValidParamCount()
 {
     BOOL bBadParamCount = FALSE;
 
@@ -465,6 +465,7 @@ BOOL CPShaderValidator::Rule_ValidParamCount()
     case D3DSIO_MAD:
     case D3DSIO_LRP:
     case D3DSIO_CND:
+    case D3DSIO_CMP:
         bBadParamCount = (m_pCurrInst->m_DstParamCount != 1) || (m_pCurrInst->m_SrcParamCount != 3); break;
     case D3DSIO_TEXCOORD:
     case D3DSIO_TEXKILL:
@@ -472,17 +473,19 @@ BOOL CPShaderValidator::Rule_ValidParamCount()
     case D3DSIO_DEF: // we skipped the last 4 parameters (float vector) - nothing to check
         bBadParamCount = (m_pCurrInst->m_DstParamCount != 1) || (m_pCurrInst->m_SrcParamCount != 0); break;
     case D3DSIO_TEXBEM:
-    case D3DSIO_TEXBEM_LEGACY:
     case D3DSIO_TEXBEML:
-    case D3DSIO_TEXBEML_LEGACY:
     case D3DSIO_TEXREG2AR:
     case D3DSIO_TEXREG2GB:
     case D3DSIO_TEXM3x2PAD:
     case D3DSIO_TEXM3x2TEX:
     case D3DSIO_TEXM3x3PAD:
     case D3DSIO_TEXM3x3TEX:
-    case D3DSIO_TEXM3x3DIFF:
     case D3DSIO_TEXM3x3VSPEC:
+    case D3DSIO_TEXM3x2DEPTH:
+    case D3DSIO_TEXDP3:
+    case D3DSIO_TEXREG2RGB:
+    case D3DSIO_TEXM3x3:
+    case D3DSIO_TEXDP3TEX:
         bBadParamCount = (m_pCurrInst->m_DstParamCount != 1) || (m_pCurrInst->m_SrcParamCount != 1); break;
     case D3DSIO_TEXM3x3SPEC:
         bBadParamCount = (m_pCurrInst->m_DstParamCount != 1) || (m_pCurrInst->m_SrcParamCount != 2); break;
@@ -500,7 +503,7 @@ BOOL CPShaderValidator::Rule_ValidParamCount()
 }
 
 //-----------------------------------------------------------------------------
-// CPShaderValidator::Rule_ValidSrcParams
+// CPShaderValidator10::Rule_ValidSrcParams
 //
 // ** Rule:
 // for each source parameter,
@@ -508,13 +511,15 @@ BOOL CPShaderValidator::Rule_ValidParamCount()
 //          source register type must be texture register
 //          (with the exception of D3DSIO_SPEC, where Src1 must be c#), and
 //          register # must be within range for texture registers, and
-//          modifier must be D3DSPSM_NONE (or _SIGN for TexMatrixOps), and
+//          modifier must be D3DSPSM_NONE (or _BX2 for TexMatrixOps [version<=1.1], 
+//                                            _BX2 for any tex* op [version>=1.2])
 //          swizzle must be D3DSP_NOSWIZZLE
 //      else (non texture instruction)
 //          source register type must be D3DSPR_TEMP/_INPUT/_CONST/_TEXTURE
 //          register # must be within range for register type
 //          modifier must be D3DSPSM_NONE/_NEG/_BIAS/_BIASNEG/_SIGN/_SIGNNEG/_COMP
 //          swizzle must be D3DSP_NOSWIZZLE/_REPLICATEALPHA
+//                           and for ps.1.1+, D3DSP_REPLICATEBLUE (only on alpha op)
 //
 // Note that the parameter count for D3DSIO_DEF is treated as 1
 // (dest only), so this rule does nothing for it.
@@ -531,13 +536,13 @@ BOOL CPShaderValidator::Rule_ValidParamCount()
 // e.g. Rule_SrcInitialized.
 //
 //-----------------------------------------------------------------------------
-BOOL CPShaderValidator::Rule_ValidSrcParams()  // could break this down for more granularity
+BOOL CPShaderValidator10::Rule_ValidSrcParams()  // could break this down for more granularity
 {
     for( UINT i = 0; i < m_pCurrInst->m_SrcParamCount; i++ )
     {
         BOOL bFoundSrcError = FALSE;
         SRCPARAM* pSrcParam = &(m_pCurrInst->m_SrcParam[i]);
-        char* SourceName[7] = {"first", "second", "third", "fourth", "fifth", "sixth", "seventh"};
+        char* SourceName[3] = {"first", "second", "third"};
         if( _CURR_PS_INST->m_bTexOp )
         {
             if( D3DSPR_TEXTURE != pSrcParam->m_RegType )
@@ -558,7 +563,7 @@ BOOL CPShaderValidator::Rule_ValidSrcParams()  // could break this down for more
                 else
                 {
                     Spew( SPEW_INSTRUCTION_ERROR, m_pCurrInst,
-                                    "Src reg for tex ops must be TEXTURE register (%s source param).",
+                                    "Src reg for tex* instruction must be t# register (%s source param).",
                                     SourceName[i]);
                     m_ErrorCount++;
                     bFoundSrcError = TRUE;
@@ -571,7 +576,8 @@ BOOL CPShaderValidator::Rule_ValidSrcParams()  // could break this down for more
             case D3DSPR_CONST:      ValidRegNum = m_pConstRegFile->GetNumRegs(); break;
             case D3DSPR_TEXTURE:    ValidRegNum = m_pTextureRegFile->GetNumRegs(); break;
             default:
-                Spew( SPEW_INSTRUCTION_ERROR, m_pCurrInst, "Invalid reg type (%s source param).", SourceName[i]);
+                Spew( SPEW_INSTRUCTION_ERROR, m_pCurrInst, "Invalid reg type (%s source param).",
+                        SourceName[i]);
                 m_ErrorCount++;
                 bFoundSrcError = TRUE;
                 goto LOOP_CONTINUE;
@@ -585,12 +591,31 @@ BOOL CPShaderValidator::Rule_ValidSrcParams()  // could break this down for more
                 bFoundSrcError = TRUE;
             }
 
+            switch(pSrcParam->m_SrcMod)
+            {
+            case D3DSPSM_NONE:
+                break;
+            case D3DSPSM_SIGN:
+                if( D3DPS_VERSION(1,1) >= m_Version )
+                {
+                    if( !(_CURR_PS_INST->m_bTexMOp) )
+                    {
+                        Spew( SPEW_INSTRUCTION_ERROR, m_pCurrInst, "_bx2 is a valid src mod for texM* instructions only (%s source param).", SourceName[i]);
+                        m_ErrorCount++;
+                    }
+                }
+                break;
+            default:
+                Spew( SPEW_INSTRUCTION_ERROR, m_pCurrInst, "Invalid src mod for tex* instruction (%s source param).", SourceName[i]);
+                m_ErrorCount++;
+                bFoundSrcError = TRUE;
+            }
             switch (pSrcParam->m_SwizzleShift)
             {
             case D3DSP_NOSWIZZLE:
                 break;
             default:
-                Spew( SPEW_INSTRUCTION_ERROR, m_pCurrInst, "Invalid src swizzle for tex op (%s source param).", SourceName[i]);
+                Spew( SPEW_INSTRUCTION_ERROR, m_pCurrInst, "Source swizzle not allowed for tex* instruction (%s source param).", SourceName[i]);
                 m_ErrorCount++;
                 bFoundSrcError = TRUE;
             }
@@ -618,7 +643,6 @@ BOOL CPShaderValidator::Rule_ValidSrcParams()  // could break this down for more
                 bFoundSrcError = TRUE;
             }
 
-            // instruction is not xfc
             switch( pSrcParam->m_SrcMod )
             {
             case D3DSPSM_NONE:
@@ -635,14 +659,36 @@ BOOL CPShaderValidator::Rule_ValidSrcParams()  // could break this down for more
                 m_ErrorCount++;
                 bFoundSrcError = TRUE;
             }
-    
+
             switch( pSrcParam->m_SwizzleShift )
             {
             case D3DSP_NOSWIZZLE:
-            case D3DVS_X_X | D3DVS_Y_Y | D3DVS_Z_Z | D3DVS_W_Z:
             case D3DSP_REPLICATEALPHA:
-            case D3DVS_X_Z | D3DVS_Y_Z | D3DVS_Z_Z | D3DVS_W_Z:
                 break;
+            case D3DSP_REPLICATEBLUE:
+                if( D3DPS_VERSION(1,1) <= m_Version )
+                {
+                    DSTPARAM* pDstParam = &(m_pCurrInst->m_DstParam);
+                    BOOL bVectorOp = FALSE;
+                    switch( _CURR_PS_INST->m_Type )
+                    {
+                    case D3DSIO_DP3:
+                    case D3DSIO_DP4:
+                        bVectorOp = TRUE;
+                        break;
+                    }
+                    if((m_pCurrInst->m_DstParam.m_WriteMask & (D3DSP_WRITEMASK_0 | D3DSP_WRITEMASK_1 | D3DSP_WRITEMASK_2))
+                       || bVectorOp )
+                    {
+                        Spew( SPEW_INSTRUCTION_ERROR, m_pCurrInst, "Src selector .b (%s source param) is only valid for instructions that occur in the alpha pipe.",
+                                           SourceName[i]);
+                        m_ErrorCount++;
+                        bFoundSrcError = TRUE;
+                    }
+                    break;
+                }
+                    
+                // falling through
             default:
                 Spew( SPEW_INSTRUCTION_ERROR, m_pCurrInst, "Invalid src swizzle for %s source param.",
                                    SourceName[i]);
@@ -662,17 +708,195 @@ LOOP_CONTINUE:
 }
 
 //-----------------------------------------------------------------------------
-// CPShaderValidator::Rule_SrcNoLongerAvailable
+// CPShaderValidator10::Rule_NegateAfterSat
+//
+// ** Rule:
+// for each source parameter,
+//      if the last write to the register had _sat destination modifier,
+//      then _NEG or _BIASNEG source modifiers are not allowed (version 1.1 and below)
+//
+// ** When to call:
+// Per instruction.
+//
+// ** Returns:
+// Always TRUE.
+//
+//-----------------------------------------------------------------------------
+BOOL CPShaderValidator10::Rule_NegateAfterSat()
+{
+    if( D3DPS_VERSION(1,2) <= m_Version )
+        return TRUE;
+
+    for( UINT i = 0; i < m_pCurrInst->m_SrcParamCount; i++ )
+    {
+        SRCPARAM* pSrcParam = &(m_pCurrInst->m_SrcParam[i]);
+        UINT RegNum = pSrcParam->m_RegNum;
+        char* SourceName[3] = {"first", "second", "third"};
+        DWORD AffectedComponents = 0;
+
+        if( m_bSrcParamError[i] )
+            continue;
+
+        switch( pSrcParam->m_SrcMod )
+        {
+        case D3DSPSM_NEG:
+        case D3DSPSM_BIASNEG:
+            break;
+        default:
+            continue;
+        }
+
+        for( UINT Component = 0; Component < 4; Component++ )
+        {
+            if( !(COMPONENT_MASKS[Component] & pSrcParam->m_ComponentReadMask) )
+                continue;
+
+            CAccessHistoryNode* pMostRecentWriter = NULL;
+            switch( pSrcParam->m_RegType )
+            {
+            case D3DSPR_TEXTURE:
+                pMostRecentWriter = m_pTextureRegFile->m_pAccessHistory[Component][RegNum].m_pMostRecentWriter;
+                break;
+            case D3DSPR_INPUT:
+                pMostRecentWriter = m_pInputRegFile->m_pAccessHistory[Component][RegNum].m_pMostRecentWriter;
+                break;
+            case D3DSPR_TEMP:
+                pMostRecentWriter = m_pTempRegFile->m_pAccessHistory[Component][RegNum].m_pMostRecentWriter;
+                break;
+            case D3DSPR_CONST:
+                pMostRecentWriter = m_pConstRegFile->m_pAccessHistory[Component][RegNum].m_pMostRecentWriter;
+                break;
+            }
+
+            if( pMostRecentWriter &&
+                pMostRecentWriter->m_pInst &&
+                (((CPSInstruction*)pMostRecentWriter->m_pInst)->m_CycleNum != _CURR_PS_INST->m_CycleNum) &&
+                (D3DSPDM_SATURATE == pMostRecentWriter->m_pInst->m_DstParam.m_DstMod )
+              )
+            {
+                AffectedComponents |= COMPONENT_MASKS[Component];
+            }
+        }
+        if( AffectedComponents )
+        {
+            Spew( SPEW_INSTRUCTION_ERROR, m_pCurrInst,
+                "Cannot apply a negation source modifier on data that was last written with the saturate destination modifier. "
+                "Affected components(*) of %s source param: %s",
+                SourceName[i],MakeAffectedComponentsText(AffectedComponents,TRUE,FALSE));
+            m_ErrorCount++;
+            m_bSrcParamError[i] = TRUE;
+        }
+    }
+    return TRUE;
+}
+
+//-----------------------------------------------------------------------------
+// CPShaderValidator10::Rule_SatBeforeBiasOrComplement()
+//
+// ** Rule:
+// for each component of each source parameter,
+//     if _BIAS or _COMP is applied to the source parameter, and
+//     there was a previous writer that was a non-tex op
+//         if the previous writer didn't do a _sat on its write, then
+//              -> spew error.
+//
+// ** When to call:
+// Per instruction.
+//
+// ** Returns:
+// Always TRUE.
+//
+//-----------------------------------------------------------------------------
+BOOL CPShaderValidator10::Rule_SatBeforeBiasOrComplement()
+{
+#ifdef SHOW_VALIDATION_WARNINGS
+    for( UINT i = 0; i < m_pCurrInst->m_SrcParamCount; i++ )
+    {
+        SRCPARAM* pSrcParam = &(m_pCurrInst->m_SrcParam[i]);
+        UINT RegNum = pSrcParam->m_RegNum;
+        char* SourceName[3] = {"first", "second", "third"};
+        DWORD AffectedComponents = 0;
+
+        if( m_bSrcParamError[i] )
+            continue;
+
+        switch( pSrcParam->m_SrcMod )
+        {
+        case D3DSPSM_BIAS:
+        case D3DSPSM_COMP:
+            break;
+        default:
+            continue;
+        }
+
+        for( UINT Component = 0; Component < 4; Component++ )
+        {
+            if( !(COMPONENT_MASKS[Component] & pSrcParam->m_ComponentReadMask) )
+                continue;
+
+            CAccessHistoryNode* pMostRecentWriter = NULL;
+            switch( pSrcParam->m_RegType )
+            {
+            case D3DSPR_TEXTURE:
+                pMostRecentWriter = m_pTextureRegFile->m_pAccessHistory[Component][RegNum].m_pMostRecentWriter;
+                break;
+            case D3DSPR_INPUT:
+                pMostRecentWriter = m_pInputRegFile->m_pAccessHistory[Component][RegNum].m_pMostRecentWriter;
+                break;
+            case D3DSPR_TEMP:
+                pMostRecentWriter = m_pTempRegFile->m_pAccessHistory[Component][RegNum].m_pMostRecentWriter;
+                break;
+            case D3DSPR_CONST:
+                pMostRecentWriter = m_pConstRegFile->m_pAccessHistory[Component][RegNum].m_pMostRecentWriter;
+                break;
+            }
+
+            if( pMostRecentWriter &&
+                pMostRecentWriter->m_pInst &&
+                (((CPSInstruction*)pMostRecentWriter->m_pInst)->m_CycleNum != _CURR_PS_INST->m_CycleNum) &&
+                !((CPSInstruction*)pMostRecentWriter->m_pInst)->m_bTexOp &&
+                (D3DSPDM_SATURATE != pMostRecentWriter->m_pInst->m_DstParam.m_DstMod )
+              )
+            {
+                AffectedComponents |= COMPONENT_MASKS[Component];
+            }
+        }
+        if( AffectedComponents )
+        {
+            // Warnings only
+
+            if( D3DSPSM_BIAS == pSrcParam->m_SrcMod )
+                Spew( SPEW_INSTRUCTION_WARNING, m_pCurrInst,
+                    "When using the bias source modifier on a register, "
+                    "the previous writer should apply the saturate modifier. "
+                    "This would ensure consistent behaviour across different hardware. "
+                    "Affected components(*) of %s source param: %s",
+                    SourceName[i],MakeAffectedComponentsText(AffectedComponents,TRUE,FALSE));
+            else
+                Spew( SPEW_INSTRUCTION_WARNING, m_pCurrInst,
+                    "When using the complement source modifier on a register, "
+                    "the previous writer should apply the saturate destination modifier. "
+                    "This would ensure consistent behaviour across different hardware. "
+                    "Affected components(*) of %s source param: %s",
+                    SourceName[i],MakeAffectedComponentsText(AffectedComponents,TRUE,FALSE));
+        }
+    }
+#endif
+    return TRUE;
+}
+
+//-----------------------------------------------------------------------------
+// CPShaderValidator10::Rule_SrcNoLongerAvailable
 //
 // ** Rule:
 // for each source parameter,
 //     if it refers to a texture register then
 //          for each component of the source register that needs to be read,
-//              the src register cannot have been written by TEXKILL or TEXM*PAD instructions, and
+//              the src register cannot have been written by TEXKILL or TEXM*PAD TEXM3x2DEPTH instructions, and
 //              if the instruction is a tex op then
 //                  the src register cannot have been written by TEXBEM or TEXBEML
 //              else
-//                  the src register cannot have been read by any tex op (unless the tex op
+//                  the src register cannot have been read by any tex op (1.0 only)
 //                          
 //
 // ** When to call:
@@ -684,7 +908,7 @@ LOOP_CONTINUE:
 // Always TRUE.
 //
 //-----------------------------------------------------------------------------
-BOOL CPShaderValidator::Rule_SrcNoLongerAvailable()
+BOOL CPShaderValidator10::Rule_SrcNoLongerAvailable()
 {
     for( UINT i = 0; i < m_pCurrInst->m_SrcParamCount; i++ )
     {
@@ -708,6 +932,7 @@ BOOL CPShaderValidator::Rule_SrcNoLongerAvailable()
                     switch( pMostRecentWriter->m_pInst->m_Type )
                     {
                     case D3DSIO_TEXKILL:
+                    case D3DSIO_TEXM3x2DEPTH:
                     case D3DSIO_TEXM3x2PAD:
                     case D3DSIO_TEXM3x3PAD:
                         AffectedComponents |= COMPONENT_MASKS[Component];
@@ -718,8 +943,9 @@ BOOL CPShaderValidator::Rule_SrcNoLongerAvailable()
         if( AffectedComponents )
         {
             Spew( SPEW_INSTRUCTION_ERROR, m_pCurrInst,
-                "Texture register result of TEXKILL or TEXM*PAD instructions must not be read. Affected components(*) of %s source param: %s",
-                SourceName[i],MakeAffectedComponentsText(AffectedComponents));
+                "Texture register result of texkill%s or texm*pad instructions must not be read. Affected components(*) of %s source param: %s",
+                (D3DPS_VERSION(1,3) <= m_Version) ? ", texm3x2depth" : "",
+                SourceName[i],MakeAffectedComponentsText(AffectedComponents,TRUE,FALSE));
             m_ErrorCount++;
             m_bSrcParamError[i] = TRUE;
         }
@@ -750,14 +976,17 @@ BOOL CPShaderValidator::Rule_SrcNoLongerAvailable()
             if( AffectedComponents )
             {
                 Spew( SPEW_INSTRUCTION_ERROR, m_pCurrInst,
-                    "Texture register result of TEXBEM or TEXBEML instruction must not be read by TEX* instruction. Affected components(*) of %s source param: %s",
-                    SourceName[i],MakeAffectedComponentsText(AffectedComponents));
+                    "Texture register result of texbem or texbeml instruction must not be read by tex* instruction. Affected components(*) of %s source param: %s",
+                    SourceName[i],MakeAffectedComponentsText(AffectedComponents,TRUE,FALSE));
                 m_ErrorCount++;
                 m_bSrcParamError[i] = TRUE;
             }
         }
-        else
+        else // non-tex op
         {
+            if( D3DPS_VERSION(1,1) <= m_Version )
+                continue;
+
             AffectedComponents = 0;
             for( UINT Component = 0; Component < 4; Component++ )
             {
@@ -779,8 +1008,8 @@ BOOL CPShaderValidator::Rule_SrcNoLongerAvailable()
             if( AffectedComponents )
             {
                 Spew( SPEW_INSTRUCTION_ERROR, m_pCurrInst,
-                    "Texture register that has been read by a tex op cannot be read by a non-tex op. Affected components(*) of %s source param: %s",
-                    SourceName[i],MakeAffectedComponentsText(AffectedComponents));
+                    "Texture register that has been read by a tex* instruction cannot be read by a non-tex* instruction. Affected components(*) of %s source param: %s",
+                    SourceName[i],MakeAffectedComponentsText(AffectedComponents,TRUE,FALSE));
                 m_ErrorCount++;
                 m_bSrcParamError[i] = TRUE;
             }
@@ -790,7 +1019,7 @@ BOOL CPShaderValidator::Rule_SrcNoLongerAvailable()
 }
 
 //-----------------------------------------------------------------------------
-// CPShaderValidator::Rule_MultipleDependentTextureReads
+// CPShaderValidator10::Rule_MultipleDependentTextureReads
 //
 // ** Rule:
 //
@@ -821,7 +1050,7 @@ BOOL CPShaderValidator::Rule_SrcNoLongerAvailable()
 // Always TRUE.
 //
 //-----------------------------------------------------------------------------
-BOOL CPShaderValidator::Rule_MultipleDependentTextureReads()
+BOOL CPShaderValidator10::Rule_MultipleDependentTextureReads()
 {
     if( !_CURR_PS_INST->m_bTexOpThatReadsTexture )
         return TRUE;
@@ -877,7 +1106,7 @@ BOOL CPShaderValidator::Rule_MultipleDependentTextureReads()
 }
 
 //-----------------------------------------------------------------------------
-// CPShaderValidator::Rule_SrcInitialized
+// CPShaderValidator10::Rule_SrcInitialized
 //
 // ** Rule:
 // for each source parameter,
@@ -912,9 +1141,9 @@ BOOL CPShaderValidator::Rule_MultipleDependentTextureReads()
 // NOTE: This rule also updates the access history to indicate reads of the
 // affected components of each source register.
 //-----------------------------------------------------------------------------
-BOOL CPShaderValidator::Rule_SrcInitialized()
+BOOL CPShaderValidator10::Rule_SrcInitialized()
 {
-    DSTPARAM* pDstParam = &(m_pCurrInst->m_DstParam[0]);
+    DSTPARAM* pDstParam = &(m_pCurrInst->m_DstParam);
 
     for( UINT i = 0; i < m_pCurrInst->m_SrcParamCount; i++ )
     {
@@ -982,7 +1211,7 @@ BOOL CPShaderValidator::Rule_SrcInitialized()
             {
                 Spew( SPEW_INSTRUCTION_ERROR, m_pCurrInst, "Read of uninitialized component%s(*) in %s%d: %s",
                     NumUninitializedComponents > 1 ? "s" : "",
-                    RegChar, RegNum, MakeAffectedComponentsText(UninitializedComponentsMask));
+                    RegChar, RegNum, MakeAffectedComponentsText(UninitializedComponentsMask,TRUE,FALSE));
                 m_ErrorCount++;
             }
         }
@@ -1027,7 +1256,7 @@ BOOL CPShaderValidator::Rule_SrcInitialized()
 }
 
 //-----------------------------------------------------------------------------
-// CPShaderValidator::Rule_ValidDstParam
+// CPShaderValidator10::Rule_ValidDstParam
 //
 // ** Rule:
 // if instruction is D3DSIO_DEF, then do nothing - this case has its own separate rule
@@ -1039,12 +1268,11 @@ BOOL CPShaderValidator::Rule_SrcInitialized()
 //      if instruction is a texture instruction, then
 //          the dst register must be of type D3DSPR_TEXTURE, and
 //          the writemask must be D3DSP_WRITEMASK_ALL, and
-//          the dst modifier must be D3DSPDM_NONE (or _SAT on version > 1.1), and
+//          the dst modifier must be D3DSPDM_NONE (or _SAT on version > 1.2), and
 //          the dst shift must be none
 //      else (non tex instruction)
-//          the dst modifier must be D3DSPDM_NONE or _BIAS, and
-//          dst shift must be /2, none, *2, or *4 (for v.255.255, any shift allowed) and
-//          multiple dsts must not refer to the same register unless it is discard.
+//          the dst modifier must be D3DSPDM_NONE or _SATURATE, and
+//          dst shift must be /2, none, *2, or *4
 //
 // ** When to call:
 // Per instruction.
@@ -1057,11 +1285,11 @@ BOOL CPShaderValidator::Rule_SrcInitialized()
 // is recorded by this function, so subsequent rules may check for previous
 // write to registers.
 //-----------------------------------------------------------------------------
-BOOL CPShaderValidator::Rule_ValidDstParam() // could break this down for more granularity
+BOOL CPShaderValidator10::Rule_ValidDstParam() // could break this down for more granularity
 {
-    BOOL   bFoundDstError;
-    DSTPARAM* pDstParam;
-    UINT RegNum;
+    BOOL   bFoundDstError = FALSE;
+    DSTPARAM* pDstParam = &(m_pCurrInst->m_DstParam);
+    UINT RegNum = pDstParam->m_RegNum;
     if( D3DSIO_DEF == m_pCurrInst->m_Type )
     {
         // _DEF is a special instruction whose dest is a const register.
@@ -1072,192 +1300,160 @@ BOOL CPShaderValidator::Rule_ValidDstParam() // could break this down for more g
         return TRUE;
     }
 
-    // step through all dst params in instruction
-    for(UINT di=0; di<m_pCurrInst->m_DstParamCount; di++)
+    if( pDstParam->m_bParamUsed )
     {
-        pDstParam = &(m_pCurrInst->m_DstParam[di]);
-        RegNum = pDstParam->m_RegNum;
-        bFoundDstError = FALSE;
-    
-        if( pDstParam->m_bParamUsed )
+        UINT ValidRegNum = 0;
+
+        BOOL bWritable = FALSE;
+        switch( pDstParam->m_RegType )
         {
-            UINT ValidRegNum = 0;
-    
-            BOOL bWritable = FALSE;
+        case D3DSPR_TEMP:
+            bWritable = m_pTempRegFile->IsWritable();
+            ValidRegNum = m_pTempRegFile->GetNumRegs();
+            break;
+        case D3DSPR_TEXTURE:
+            if( _CURR_PS_INST->m_bTexOp )
+                bWritable = TRUE;
+            else
+                bWritable = m_pTextureRegFile->IsWritable();
+
+            ValidRegNum = m_pTextureRegFile->GetNumRegs();
+            break;
+        }
+
+        if( !bWritable || !ValidRegNum )
+        {
+            Spew( SPEW_INSTRUCTION_ERROR, m_pCurrInst, "Invalid reg type for dest param." );
+            m_ErrorCount++;
+            bFoundDstError = TRUE;
+        }
+        else if( RegNum >= ValidRegNum )
+        {
+            Spew( SPEW_INSTRUCTION_ERROR, m_pCurrInst, "Invalid dest reg num: %d. Max allowed for this reg type is %d.",
+                RegNum, ValidRegNum - 1);
+            m_ErrorCount++;
+            bFoundDstError = TRUE;
+        }
+        else
+        {
+            // Make sure we aren't writing to a register that is no longer available.
+
+            if( D3DSPR_TEXTURE == pDstParam->m_RegType )
+            {
+                for( UINT Component = 0; Component < 4; Component++ )
+                {
+                    CAccessHistoryNode* pMostRecentWriter = m_pTextureRegFile->m_pAccessHistory[Component][RegNum].m_pMostRecentWriter;
+                    if( pMostRecentWriter && pMostRecentWriter->m_pInst  )
+                    {
+                        switch( pMostRecentWriter->m_pInst->m_Type )
+                        {
+                        case D3DSIO_TEXM3x2DEPTH:
+                            Spew( SPEW_INSTRUCTION_ERROR, m_pCurrInst,
+                                "Destination of texm3x2depth instruction (t%d) is not available elsewhere in shader.",
+                                RegNum);
+                            m_ErrorCount++;
+                            return TRUE;
+                        }
+                    }
+                }
+            }
+        }
+
+        if( _CURR_PS_INST->m_bTexOp )
+        {
+            if( D3DSPR_TEXTURE != pDstParam->m_RegType )
+            {
+                Spew( SPEW_INSTRUCTION_ERROR, m_pCurrInst, "Must use texture register a dest param for tex* instructions." );
+                m_ErrorCount++;
+                bFoundDstError = TRUE;
+            }
+            if( D3DSP_WRITEMASK_ALL != pDstParam->m_WriteMask )
+            {
+                Spew( SPEW_INSTRUCTION_ERROR, m_pCurrInst, "tex* instructions must write all components." );
+                m_ErrorCount++;
+                bFoundDstError = TRUE;
+            }
+            switch( pDstParam->m_DstMod )
+            {
+            case D3DSPDM_NONE:
+                break;
+            case D3DSPDM_SATURATE:
+                // falling through
+            default:
+                Spew( SPEW_INSTRUCTION_ERROR, m_pCurrInst, "Instruction modifiers are not allowed for tex* instructions." );
+                m_ErrorCount++;
+                bFoundDstError = TRUE;
+            }
+            switch( pDstParam->m_DstShift )
+            {
+            case DSTSHIFT_NONE:
+                break;
+            default:
+                Spew( SPEW_INSTRUCTION_ERROR, m_pCurrInst, "Dest shift not allowed for tex* instructions." );
+                m_ErrorCount++;
+                bFoundDstError = TRUE;
+            }
+        }
+        else
+        {
+            switch( pDstParam->m_DstMod )
+            {
+            case D3DSPDM_NONE:
+            case D3DSPDM_SATURATE:
+                break;
+            default:
+                Spew( SPEW_INSTRUCTION_ERROR, m_pCurrInst, "Invalid dst modifier." );
+                m_ErrorCount++;
+                bFoundDstError = TRUE;
+            }
+
+            switch( pDstParam->m_DstShift )
+            {
+            case DSTSHIFT_NONE:
+            case DSTSHIFT_X2:
+            case DSTSHIFT_X4:
+            case DSTSHIFT_D2:
+                break;
+            default:
+                Spew( SPEW_INSTRUCTION_ERROR, m_pCurrInst, "Invalid dst shift." );
+                m_ErrorCount++;
+                bFoundDstError = TRUE;
+            }
+        }
+
+        if( (D3DSP_WRITEMASK_ALL != pDstParam->m_WriteMask)
+            && ((D3DSP_WRITEMASK_0 | D3DSP_WRITEMASK_1 | D3DSP_WRITEMASK_2) != pDstParam->m_WriteMask )
+            && (D3DSP_WRITEMASK_3 != pDstParam->m_WriteMask ) )
+        {
+            Spew( SPEW_INSTRUCTION_ERROR, m_pCurrInst, "Dest write mask must be .rgb, .a, or .rgba (all)." );
+            m_ErrorCount++;
+            bFoundDstError = TRUE;
+        }
+
+        if( !bFoundDstError )
+        {
+            // Update register file to indicate write.
+            
+            CRegisterFile* pRegFile = NULL;
             switch( pDstParam->m_RegType )
             {
-            case D3DSPR_INPUT:
-                bWritable = m_pInputRegFile->IsWritable();
-                ValidRegNum = m_pInputRegFile->GetNumRegs();
-                break;
-    
-            case D3DSPR_TEMP:
-                bWritable = m_pTempRegFile->IsWritable();
-                ValidRegNum = m_pTempRegFile->GetNumRegs();
-                break;
-            case D3DSPR_TEXTURE:
-                if( _CURR_PS_INST->m_bTexOp )
-                    bWritable = TRUE;
-                else
-                    bWritable = m_pTextureRegFile->IsWritable();
-    
-                ValidRegNum = m_pTextureRegFile->GetNumRegs();
-                break;
+            case D3DSPR_TEMP:       pRegFile = m_pTempRegFile; break;
+            case D3DSPR_TEXTURE:    pRegFile = m_pTextureRegFile; break;
             }
-    
-            if( !bWritable || !ValidRegNum )
-            {
-                Spew( SPEW_INSTRUCTION_ERROR, m_pCurrInst, "Invalid reg type for dest param." );
-                m_ErrorCount++;
-                bFoundDstError = TRUE;
-            }
-            else if( RegNum >= ValidRegNum )
-            {
-                Spew( SPEW_INSTRUCTION_ERROR, m_pCurrInst, "Invalid dest reg num: %d. Max allowed for this reg type is %d.",
-                    RegNum, ValidRegNum - 1);
-                m_ErrorCount++;
-                bFoundDstError = TRUE;
-            }
-    
-            if( _CURR_PS_INST->m_bTexOp )
-            {
-                // check to see if r0.a is initialized by this instruction
-                if((RegNum == 0) && ((D3DSIO_TEX == m_pCurrInst->m_Type) || 
-                                     (D3DSIO_TEXCOORD == m_pCurrInst->m_Type)))
-                {
-                    // r0.a is initialized with t0.a
-                    m_pTempRegFile->m_pAccessHistory[3][0].m_bPreShaderInitialized = TRUE;
-                }
 
-                if( D3DSPR_TEXTURE != pDstParam->m_RegType )
-                {
-                    Spew( SPEW_INSTRUCTION_ERROR, m_pCurrInst, "Must use texture register a dest param for tex ops." );
-                    m_ErrorCount++;
-                    bFoundDstError = TRUE;
-                }
-                if( D3DSP_WRITEMASK_ALL != pDstParam->m_WriteMask )
-                {
-                    Spew( SPEW_INSTRUCTION_ERROR, m_pCurrInst, "TEX ops must write all components." );
-                    m_ErrorCount++;
-                    bFoundDstError = TRUE;
-                }
-                switch( pDstParam->m_DstMod )
-                {
-                case D3DSPDM_NONE:
-                    break;
-    
-                    // falling through
-                default:
-                    Spew( SPEW_INSTRUCTION_ERROR, m_pCurrInst, "Invalid dst modifier for tex op." );
-                    m_ErrorCount++;
-                    bFoundDstError = TRUE;
-                }
-                switch( pDstParam->m_DstShift )
-                {
-                case DSTSHIFT_NONE:
-                    break;
-                default:
-                    Spew( SPEW_INSTRUCTION_ERROR, m_pCurrInst, "Dst shift not allowed for tex op." );
-                    m_ErrorCount++;
-                    bFoundDstError = TRUE;
-                }
-            }
-            else
+            if( pRegFile )
             {
-                switch( pDstParam->m_DstMod )
-                {
-                case D3DSPDM_NONE:
-                    break;
-                default:
-                    Spew( SPEW_INSTRUCTION_ERROR, m_pCurrInst, "Invalid dst modifier." );
-                    m_ErrorCount++;
-                    bFoundDstError = TRUE;
-                }
-    
-                if( D3DPS_VERSION(255,255) != m_Version )
-                {
-                    switch( pDstParam->m_DstShift )
-                    {
-                    case DSTSHIFT_NONE:
-                    case DSTSHIFT_X2:
-                    case DSTSHIFT_X4:
-                    case DSTSHIFT_D2:
-                        break;
-                    default:
-                        Spew( SPEW_INSTRUCTION_ERROR, m_pCurrInst, "Invalid dst shift." );
-                        m_ErrorCount++;
-                        bFoundDstError = TRUE;
-                    }
-                }
-            }
-    
-            if( (D3DSP_WRITEMASK_ALL != pDstParam->m_WriteMask)
-                && ((D3DSP_WRITEMASK_0 | D3DSP_WRITEMASK_1 | D3DSP_WRITEMASK_2) != pDstParam->m_WriteMask )
-                && (D3DSP_WRITEMASK_3 != pDstParam->m_WriteMask ) )
-            {
-                Spew( SPEW_INSTRUCTION_ERROR, m_pCurrInst, "Dest write mask must be .rgb, .a, or .rgba (all)." );
-                m_ErrorCount++;
-                bFoundDstError = TRUE;
-            }
-    
-            DWORD dwWriteMask;
-            if(di == 0)
-            {
-                // first destination parameter
-                dwWriteMask = pDstParam->m_WriteMask;
-            }
-            else
-            {
-                // check against first dest writemask
-                if(dwWriteMask != pDstParam->m_WriteMask)
-                {
-                    Spew( SPEW_INSTRUCTION_ERROR, m_pCurrInst, "Dest write mask must be the same for all dest registers." );
-                    m_ErrorCount++;
-                    bFoundDstError = TRUE;
-                }
+                if( pDstParam->m_WriteMask & D3DSP_WRITEMASK_0 )
+                    pRegFile->m_pAccessHistory[0][RegNum].NewAccess(m_pCurrInst,TRUE);
 
-                // make sure that multiple writes are not done to the same register
-                int ci;
-                for(ci=di-1; ci>=0; ci--)
-                {
-                    DSTPARAM *pChkDstParam;
-                    pChkDstParam = &(m_pCurrInst->m_DstParam[ci]);
-                    if((pDstParam->m_RegType == pChkDstParam->m_RegType) &&
-                       (pDstParam->m_RegNum == pChkDstParam->m_RegNum) &&
-                       !((pDstParam->m_RegType == D3DSPR_TEMP) &&
-                         (pDstParam->m_RegNum == 2)))
-                    {
-                        // dst register written multiple times and it's not discard
-                        Spew( SPEW_INSTRUCTION_ERROR, m_pCurrInst, "Dest register other than discard written twice." );
-                        m_ErrorCount++;
-                        bFoundDstError = TRUE;
-                    }
-                }
-            }
-            // Update register file to indicate write.
-            if( !bFoundDstError )
-            {
-                CRegisterFile* pRegFile = NULL;
-                switch( pDstParam->m_RegType )
-                {
-                case D3DSPR_TEMP:       pRegFile = m_pTempRegFile; break;
-                case D3DSPR_TEXTURE:    pRegFile = m_pTextureRegFile; break;
-                }
-    
-                if( pRegFile )
-                {
-                    if( pDstParam->m_WriteMask & D3DSP_WRITEMASK_0 )
-                        pRegFile->m_pAccessHistory[0][RegNum].NewAccess(m_pCurrInst,TRUE);
-    
-                    if( pDstParam->m_WriteMask & D3DSP_WRITEMASK_1 )
-                        pRegFile->m_pAccessHistory[1][RegNum].NewAccess(m_pCurrInst,TRUE);
-    
-                    if( pDstParam->m_WriteMask & D3DSP_WRITEMASK_2 )
-                        pRegFile->m_pAccessHistory[2][RegNum].NewAccess(m_pCurrInst,TRUE);
-    
-                    if( pDstParam->m_WriteMask & D3DSP_WRITEMASK_3 )
-                        pRegFile->m_pAccessHistory[3][RegNum].NewAccess(m_pCurrInst,TRUE);
-                }
+                if( pDstParam->m_WriteMask & D3DSP_WRITEMASK_1 )
+                    pRegFile->m_pAccessHistory[1][RegNum].NewAccess(m_pCurrInst,TRUE);
+
+                if( pDstParam->m_WriteMask & D3DSP_WRITEMASK_2 )
+                    pRegFile->m_pAccessHistory[2][RegNum].NewAccess(m_pCurrInst,TRUE);
+
+                if( pDstParam->m_WriteMask & D3DSP_WRITEMASK_3 )
+                    pRegFile->m_pAccessHistory[3][RegNum].NewAccess(m_pCurrInst,TRUE);
             }
         }
     }
@@ -1266,7 +1462,7 @@ BOOL CPShaderValidator::Rule_ValidDstParam() // could break this down for more g
 }
 
 //-----------------------------------------------------------------------------
-// CPShaderValidator::Rule_ValidRegisterPortUsage
+// CPShaderValidator10::Rule_ValidRegisterPortUsage
 //
 // ** Rule:
 // Each register class (TEMP,TEXTURE,INPUT,CONST) may only appear as parameters
@@ -1282,26 +1478,41 @@ BOOL CPShaderValidator::Rule_ValidDstParam() // could break this down for more g
 // Always TRUE.
 //
 //-----------------------------------------------------------------------------
-BOOL CPShaderValidator::Rule_ValidRegisterPortUsage()
+BOOL CPShaderValidator10::Rule_ValidRegisterPortUsage()
 {
+    UINT i, j;
     UINT TempRegPortUsage[SHADER_INSTRUCTION_MAX_SRCPARAMS];
     UINT InputRegPortUsage[SHADER_INSTRUCTION_MAX_SRCPARAMS];
     UINT ConstRegPortUsage[SHADER_INSTRUCTION_MAX_SRCPARAMS];
     UINT TextureRegPortUsage[SHADER_INSTRUCTION_MAX_SRCPARAMS];
-
     UINT NumUniqueTempRegs = 0;
     UINT NumUniqueInputRegs = 0;
     UINT NumUniqueConstRegs = 0;
     UINT NumUniqueTextureRegs = 0;
+    D3DSHADER_PARAM_REGISTER_TYPE   RegType;
+    UINT                            RegNum;
 
-    for( UINT i = 0; i < m_pCurrInst->m_SrcParamCount; i++ )
+    static UINT s_TempRegPortUsageAcrossCoIssue[SHADER_INSTRUCTION_MAX_SRCPARAMS];
+    static UINT s_InputRegPortUsageAcrossCoIssue[SHADER_INSTRUCTION_MAX_SRCPARAMS];
+    static UINT s_ConstRegPortUsageAcrossCoIssue[SHADER_INSTRUCTION_MAX_SRCPARAMS];
+    static UINT s_TextureRegPortUsageAcrossCoIssue[SHADER_INSTRUCTION_MAX_SRCPARAMS];
+    static UINT s_NumUniqueTempRegsAcrossCoIssue;
+    static UINT s_NumUniqueInputRegsAcrossCoIssue;
+    static UINT s_NumUniqueConstRegsAcrossCoIssue;
+    static UINT s_NumUniqueTextureRegsAcrossCoIssue;
+ 
+    if( NULL == m_pCurrInst->m_pPrevInst )   // First instruction - initialize static vars
     {
-        D3DSHADER_PARAM_REGISTER_TYPE   RegType;
-        UINT                            RegNum;
-        UINT*                           pRegPortUsage = NULL;
-        UINT*                           pNumUniqueRegs = NULL;
-
-        if( !m_pCurrInst->m_SrcParam[i].m_bParamUsed ) continue;
+        s_NumUniqueTempRegsAcrossCoIssue = 0;
+        s_NumUniqueInputRegsAcrossCoIssue = 0;
+        s_NumUniqueConstRegsAcrossCoIssue = 0;
+        s_NumUniqueTextureRegsAcrossCoIssue = 0;
+    }
+ 
+    for( i = 0; i < m_pCurrInst->m_SrcParamCount; i++ )
+    {
+        UINT*   pRegPortUsage = NULL;
+        UINT*   pNumUniqueRegs = NULL;
 
         RegType = m_pCurrInst->m_SrcParam[i].m_RegType;
         RegNum = m_pCurrInst->m_SrcParam[i].m_RegNum;
@@ -1329,7 +1540,7 @@ BOOL CPShaderValidator::Rule_ValidRegisterPortUsage()
         if( !pRegPortUsage ) continue;
 
         BOOL    bRegAlreadyAccessed = FALSE;
-        for( UINT j = 0; j < *pNumUniqueRegs; j++ )
+        for( j = 0; j < *pNumUniqueRegs; j++ )
         {
             if( pRegPortUsage[j] == RegNum )
             {
@@ -1342,41 +1553,153 @@ BOOL CPShaderValidator::Rule_ValidRegisterPortUsage()
             pRegPortUsage[*pNumUniqueRegs] = RegNum;
             (*pNumUniqueRegs)++;
         }
+
     }
 
     if( NumUniqueTempRegs > m_pTempRegFile->GetNumReadPorts() )
     {
-        Spew( SPEW_INSTRUCTION_ERROR, m_pCurrInst, "Temp registers (r#) read %d times in one instruction.  Max #reads/instruction is %d.",
+        Spew( SPEW_INSTRUCTION_ERROR, m_pCurrInst, "%d different temp registers (r#) read by instruction.  Max. different temp registers readable per instruction is %d.",
                         NumUniqueTempRegs,  m_pTempRegFile->GetNumReadPorts());
         m_ErrorCount++;
     }
 
     if( NumUniqueInputRegs > m_pInputRegFile->GetNumReadPorts() )
     {
-        Spew( SPEW_INSTRUCTION_ERROR, m_pCurrInst, "Input registers (v#) read %d times by instruction.  Max #reads/instruction is %d.",
+        Spew( SPEW_INSTRUCTION_ERROR, m_pCurrInst, "%d different input registers (v#) read by instruction.  Max. different input registers readable per instruction is %d.",
                         NumUniqueInputRegs,  m_pInputRegFile->GetNumReadPorts());
         m_ErrorCount++;
     }
 
     if( NumUniqueConstRegs > m_pConstRegFile->GetNumReadPorts() )
     {
-        Spew( SPEW_INSTRUCTION_ERROR, m_pCurrInst, "Constant registers (c#) read %d times by instruction.  Max #reads/instruction is %d.",
+        Spew( SPEW_INSTRUCTION_ERROR, m_pCurrInst, "%d different constant registers (c#) read by instruction.  Max. different constant registers readable per instruction is %d.",
                         NumUniqueConstRegs, m_pConstRegFile->GetNumReadPorts());
         m_ErrorCount++;
     }
 
     if( NumUniqueTextureRegs > m_pTextureRegFile->GetNumReadPorts() )
     {
-        Spew( SPEW_INSTRUCTION_ERROR, m_pCurrInst, "Texture registers (t#) read %d times by instruction.  Max #reads/instruction is %d.",
+        Spew( SPEW_INSTRUCTION_ERROR, m_pCurrInst, "%d different texture registers (t#) read by instruction.  Max. different texture registers readable per instruction is %d.",
                         NumUniqueTextureRegs, m_pTextureRegFile->GetNumReadPorts());
         m_ErrorCount++;
+    }
+
+    // Read port limit for different register numbers of any one register type across co-issued instructions is MAX_READPORTS_ACROSS_COISSUE total.
+
+    if( _CURR_PS_INST->m_bCoIssue && _PREV_PS_INST && !(_PREV_PS_INST->m_bCoIssue)) // second clause is just a simple sanity check -> co-issue only involved 2 instructions.
+    {
+        for( i = 0; i < m_pCurrInst->m_SrcParamCount; i++ )
+        {
+            UINT*   pRegPortUsageAcrossCoIssue = NULL;
+            UINT*   pNumUniqueRegsAcrossCoIssue = NULL;
+
+            RegType = m_pCurrInst->m_SrcParam[i].m_RegType;
+            RegNum = m_pCurrInst->m_SrcParam[i].m_RegNum;
+
+            switch( RegType )
+            {
+            case D3DSPR_TEMP:
+                pRegPortUsageAcrossCoIssue = s_TempRegPortUsageAcrossCoIssue;
+                pNumUniqueRegsAcrossCoIssue = &s_NumUniqueTempRegsAcrossCoIssue;
+                break;
+            case D3DSPR_INPUT:
+                pRegPortUsageAcrossCoIssue = s_InputRegPortUsageAcrossCoIssue;
+                pNumUniqueRegsAcrossCoIssue = &s_NumUniqueInputRegsAcrossCoIssue;
+                break;
+            case D3DSPR_CONST:
+                pRegPortUsageAcrossCoIssue = s_ConstRegPortUsageAcrossCoIssue;
+                pNumUniqueRegsAcrossCoIssue = &s_NumUniqueConstRegsAcrossCoIssue;
+                break;
+            case D3DSPR_TEXTURE:
+                pRegPortUsageAcrossCoIssue = s_TextureRegPortUsageAcrossCoIssue;
+                pNumUniqueRegsAcrossCoIssue = &s_NumUniqueTextureRegsAcrossCoIssue;
+                break;
+            }
+
+            if( !pRegPortUsageAcrossCoIssue ) continue;
+
+            BOOL    bRegAlreadyAccessed = FALSE;
+            for( j = 0; j < *pNumUniqueRegsAcrossCoIssue; j++ )
+            {
+                if( pRegPortUsageAcrossCoIssue[j] == RegNum )
+                {
+                    bRegAlreadyAccessed = TRUE;
+                    break;
+                }
+            }
+            if( !bRegAlreadyAccessed )
+            {
+                pRegPortUsageAcrossCoIssue[*pNumUniqueRegsAcrossCoIssue] = RegNum;
+                (*pNumUniqueRegsAcrossCoIssue)++;
+            }
+        }
+
+        #define MAX_READPORTS_ACROSS_COISSUE    3
+
+        if( s_NumUniqueTempRegsAcrossCoIssue > MAX_READPORTS_ACROSS_COISSUE )
+        {
+            Spew( SPEW_INSTRUCTION_ERROR, m_pCurrInst, 
+                            "%d different temp registers (r#) read over 2 co-issued instructions. "\
+                            "Max. different register numbers from any one register type readable across co-issued instructions is %d.",
+                            s_NumUniqueTempRegsAcrossCoIssue, MAX_READPORTS_ACROSS_COISSUE);
+            m_ErrorCount++;
+        }
+
+        if( s_NumUniqueInputRegsAcrossCoIssue > MAX_READPORTS_ACROSS_COISSUE )
+        {
+            Spew( SPEW_INSTRUCTION_ERROR, m_pCurrInst, 
+                            "%d different input registers (v#) read over 2 co-issued instructions. "\
+                            "Max. different register numbers from any one register type readable across co-issued instructions is %d.",
+                            s_NumUniqueInputRegsAcrossCoIssue, MAX_READPORTS_ACROSS_COISSUE);
+            m_ErrorCount++;
+        }
+
+        if( s_NumUniqueConstRegsAcrossCoIssue > MAX_READPORTS_ACROSS_COISSUE )
+        {
+            Spew( SPEW_INSTRUCTION_ERROR, m_pCurrInst, 
+                            "%d different constant registers (c#) read over 2 co-issued instructions. "\
+                            "Max. different register numbers from any one register type readable across co-issued instructions is %d.",
+                            s_NumUniqueConstRegsAcrossCoIssue, MAX_READPORTS_ACROSS_COISSUE);
+            m_ErrorCount++;
+        }
+
+        if( s_NumUniqueTextureRegsAcrossCoIssue > MAX_READPORTS_ACROSS_COISSUE )
+        {
+            Spew( SPEW_INSTRUCTION_ERROR, m_pCurrInst, 
+                            "%d different texture registers (t#) read over 2 co-issued instructions. "\
+                            "Max. different register numbers from any one register type readable across co-issued instructions is %d.",
+                            s_NumUniqueTextureRegsAcrossCoIssue, MAX_READPORTS_ACROSS_COISSUE);
+            m_ErrorCount++;
+        }
+    }
+
+    if( !_CURR_PS_INST->m_bCoIssue )
+    {
+        // Copy all state to static vars so that in case next instruction is co-issued with this one, 
+        // cross-coissue read port limit of 3 can be enforced.
+        memcpy(&s_TempRegPortUsageAcrossCoIssue,&TempRegPortUsage,NumUniqueTempRegs*sizeof(UINT));
+        memcpy(&s_InputRegPortUsageAcrossCoIssue,&InputRegPortUsage,NumUniqueInputRegs*sizeof(UINT));
+        memcpy(&s_ConstRegPortUsageAcrossCoIssue,&ConstRegPortUsage,NumUniqueConstRegs*sizeof(UINT));
+        memcpy(&s_TextureRegPortUsageAcrossCoIssue,&TextureRegPortUsage,NumUniqueTextureRegs*sizeof(UINT));
+        s_NumUniqueTempRegsAcrossCoIssue = NumUniqueTempRegs;
+        s_NumUniqueInputRegsAcrossCoIssue = NumUniqueInputRegs;
+        s_NumUniqueConstRegsAcrossCoIssue = NumUniqueConstRegs;
+        s_NumUniqueTextureRegsAcrossCoIssue = NumUniqueTextureRegs;
+    }
+    else
+    {
+        // reset counts because the next instruction cannot be co-issued with this one.
+        s_NumUniqueTempRegsAcrossCoIssue = 0;
+        s_NumUniqueInputRegsAcrossCoIssue = 0;
+        s_NumUniqueConstRegsAcrossCoIssue = 0;
+        s_NumUniqueTextureRegsAcrossCoIssue = 0;
     }
 
     return TRUE;
 }
 
 //-----------------------------------------------------------------------------
-// CPShaderValidator::Rule_TexRegsDeclaredInOrder
+// CPShaderValidator10::Rule_TexRegsDeclaredInOrder
 //
 // ** Rule:
 // Tex registers must declared in increasing order.
@@ -1393,15 +1716,6 @@ BOOL CPShaderValidator::Rule_ValidRegisterPortUsage()
 //                          tex t1
 //                          tex t3 (note missing t2.. OK)
 //
-// For v255.255, the above applies, with the following exception:
-// A texture register may be redeclared only if it has not been
-// previously the destination of a tex-op that did a texture lookup.
-//
-// ex. valid sequence:  tex         t0
-//                      texcoord    t1   
-//                      add         t1, t1, t0 // (note 255.255 allows tex/blend op mixing)
-//                      texreg2rgb  t1, t1
-//
 // ** When to call:
 // Per instruction.
 //
@@ -1409,7 +1723,7 @@ BOOL CPShaderValidator::Rule_ValidRegisterPortUsage()
 // Always TRUE.
 //
 //-----------------------------------------------------------------------------
-BOOL CPShaderValidator::Rule_TexRegsDeclaredInOrder()
+BOOL CPShaderValidator10::Rule_TexRegsDeclaredInOrder()
 {
     static DWORD s_TexOpRegDeclOrder; // bit flags
 
@@ -1420,61 +1734,35 @@ BOOL CPShaderValidator::Rule_TexRegsDeclaredInOrder()
     if( !_CURR_PS_INST->m_bTexOp )
         return TRUE;
 
-    DWORD RegNum = m_pCurrInst->m_DstParam[0].m_RegNum;
-    if( (D3DSPR_TEXTURE != m_pCurrInst->m_DstParam[0].m_RegType) ||
+    DWORD RegNum = m_pCurrInst->m_DstParam.m_RegNum;
+    if( (D3DSPR_TEXTURE != m_pCurrInst->m_DstParam.m_RegType) ||
         (RegNum > m_pTextureRegFile->GetNumRegs()) )
     {
         return TRUE;
     }
 
-    DWORD RegMask = 1 << m_pCurrInst->m_DstParam[0].m_RegNum;
+    DWORD RegMask = 1 << m_pCurrInst->m_DstParam.m_RegNum;
     if( RegMask & s_TexOpRegDeclOrder)
     {
-        if( (D3DPS_VERSION(255,255) == m_Version) )
-        {
-            CAccessHistoryNode* pPrevWriter = m_pTextureRegFile->m_pAccessHistory[0][RegNum].m_pMostRecentWriter;
-            DXGASSERT(pPrevWriter); // We only got here if there was a previous writer.
-            if( m_pCurrInst == pPrevWriter->m_pInst ) // Already made the current inst. the most recent writer.
-                pPrevWriter = pPrevWriter->m_pPreviousWriter;
-
-            while(pPrevWriter)
-            {
-                if( ((CPSInstruction*)(pPrevWriter->m_pInst))->m_bTexOpThatReadsTexture ||
-                     ((CPSInstruction*)(pPrevWriter->m_pInst))->m_bTexMOp )
-                {
-                    Spew( SPEW_INSTRUCTION_ERROR, m_pCurrInst, "Tex register t%d already declared either by a tex op that did a texture lookup, or by a texture matrix op.",
-                                    RegNum);
-                    m_ErrorCount++;
-                    break;
-                }
-                pPrevWriter = pPrevWriter->m_pPreviousWriter;
-            }
-        }
-        else
-        {
-            Spew( SPEW_INSTRUCTION_ERROR, m_pCurrInst, "Tex register t%d already declared.",
-                            RegNum);
-            m_ErrorCount++;
-        }
+        Spew( SPEW_INSTRUCTION_ERROR, m_pCurrInst, "Tex register t%d already declared.",
+                        RegNum);
+        m_ErrorCount++;
     } 
     else if( s_TexOpRegDeclOrder > RegMask )
     {
-        Spew( SPEW_INSTRUCTION_ERROR, m_pCurrInst, "Tex registers must appear in sequence (i.e. t0 before t2 OK, but t1 before t0 not valid)." );
+        Spew( SPEW_INSTRUCTION_ERROR, m_pCurrInst, "t# registers must appear in sequence (i.e. t0 before t2 OK, but t1 before t0 not valid)." );
         m_ErrorCount++;
     }
-    s_TexOpRegDeclOrder |= (1 << m_pCurrInst->m_DstParam[0].m_RegNum);
+    s_TexOpRegDeclOrder |= (1 << m_pCurrInst->m_DstParam.m_RegNum);
     return TRUE;
 }
 
 //-----------------------------------------------------------------------------
-// CPShaderValidator::Rule_TexOpAfterNonTexOp
+// CPShaderValidator10::Rule_TexOpAfterNonTexOp
 //
 // ** Rule:
 // Tex ops (see IsTexOp() for which instructions are considered tex ops)
 // must appear before any other instruction, with the exception of DEF or NOP.
-//
-// This rule does not enforce anything in the case of a legacy pixel shader,
-// or for version 255.255
 //
 // ** When to call:
 // Per instruction.
@@ -1483,7 +1771,7 @@ BOOL CPShaderValidator::Rule_TexRegsDeclaredInOrder()
 // Always TRUE.
 //
 //-----------------------------------------------------------------------------
-BOOL CPShaderValidator::Rule_TexOpAfterNonTexOp()
+BOOL CPShaderValidator10::Rule_TexOpAfterNonTexOp()
 {
     static BOOL s_bFoundNonTexOp;
     static BOOL s_bRuleDisabled;
@@ -1491,8 +1779,7 @@ BOOL CPShaderValidator::Rule_TexOpAfterNonTexOp()
     if( NULL == m_pCurrInst->m_pPrevInst ) // First instruction - initialize static vars
     {
         s_bFoundNonTexOp = FALSE;
-        s_bRuleDisabled = ( D3DPS_VERSION(0xfe,0xfe) == m_Version ) || // Legacy pixel shader
-                          ( D3DPS_VERSION(0xff,0xff) == m_Version);    // 255.255
+        s_bRuleDisabled = FALSE;
     }
 
     if( s_bRuleDisabled )
@@ -1510,7 +1797,7 @@ BOOL CPShaderValidator::Rule_TexOpAfterNonTexOp()
 
     if( _CURR_PS_INST->m_bTexOp && s_bFoundNonTexOp )
     {
-        Spew( SPEW_INSTRUCTION_ERROR, m_pCurrInst, "Tex ops after non-tex ops." );
+        Spew( SPEW_INSTRUCTION_ERROR, m_pCurrInst, "Cannot use tex* instruction after non-tex* instruction." );
         m_ErrorCount++;
         s_bRuleDisabled = TRUE;
     }
@@ -1519,7 +1806,7 @@ BOOL CPShaderValidator::Rule_TexOpAfterNonTexOp()
 }
 
 //-----------------------------------------------------------------------------
-// CPShaderValidator::Rule_ValidTEXM3xSequence
+// CPShaderValidator10::Rule_ValidTEXM3xSequence
 //
 // ** Rule:
 // TEXM3x* instructions, if present in the pixel shader, must appear in
@@ -1533,7 +1820,7 @@ BOOL CPShaderValidator::Rule_TexOpAfterNonTexOp()
 //      3) texm3x3tex
 //
 // or   1) texm3x3pad
-//      2) texm3x3pad / texm3x3diff
+//      2) texm3x3pad
 //      3) texm3x3spec / texm3x3vspec
 //
 // ** When to call:
@@ -1543,7 +1830,7 @@ BOOL CPShaderValidator::Rule_TexOpAfterNonTexOp()
 // Always TRUE.
 //
 //-----------------------------------------------------------------------------
-BOOL CPShaderValidator::Rule_ValidTEXM3xSequence()
+BOOL CPShaderValidator10::Rule_ValidTEXM3xSequence()
 {
     static UINT s_TexMSequence;
     static UINT s_LastInst;
@@ -1563,7 +1850,7 @@ BOOL CPShaderValidator::Rule_ValidTEXM3xSequence()
     {
         if( s_TexMSequence )
         {
-            Spew( SPEW_INSTRUCTION_ERROR, m_pCurrInst, "Incomplete TEXM* sequence." );
+            Spew( SPEW_INSTRUCTION_ERROR, m_pCurrInst, "Incomplete texm* sequence." );
             m_ErrorCount++;
         }
         return TRUE;
@@ -1577,10 +1864,11 @@ BOOL CPShaderValidator::Rule_ValidTEXM3xSequence()
         {
         case D3DSIO_TEXM3x2PAD:
             if( s_TexMSequence ) goto _TexMSeqInvalid;
-            m_TexMBaseDstReg = m_pCurrInst->m_DstParam[0].m_RegNum;
+            m_TexMBaseDstReg = m_pCurrInst->m_DstParam.m_RegNum;
             s_TexMSequence = 1;
             break;
         case D3DSIO_TEXM3x2TEX:
+        case D3DSIO_TEXM3x2DEPTH:
             // must be one 3x2PAD previous
             if ( (s_TexMSequence != 1) ||
                  (s_LastInst != D3DSIO_TEXM3x2PAD) ) goto _TexMSeqInvalid;
@@ -1595,27 +1883,16 @@ BOOL CPShaderValidator::Rule_ValidTEXM3xSequence()
                 s_TexMSequence = 2;
                 break;
             }
-            m_TexMBaseDstReg = m_pCurrInst->m_DstParam[0].m_RegNum;
+            m_TexMBaseDstReg = m_pCurrInst->m_DstParam.m_RegNum;
             s_TexMSequence = 1;
             break;
+        case D3DSIO_TEXM3x3:
         case D3DSIO_TEXM3x3TEX:
+        case D3DSIO_TEXM3x3SPEC:
+        case D3DSIO_TEXM3x3VSPEC:
             // must be two 3x3PAD previous
             if ( (s_TexMSequence != 2) ||
                  (s_LastInst != D3DSIO_TEXM3x3PAD) ) goto _TexMSeqInvalid;
-            s_TexMSequence = 0;
-            break;
-        case D3DSIO_TEXM3x3DIFF:
-            // must be one 3x3PAD previous
-            if ( (s_TexMSequence != 1) ||
-                 (s_LastInst != D3DSIO_TEXM3x3PAD) ) goto _TexMSeqInvalid;
-            s_TexMSequence = 2;
-            break;
-        case D3DSIO_TEXM3x3SPEC:
-        case D3DSIO_TEXM3x3VSPEC:
-            // must be at sequence 2 w/ either PAD or DIFF previous
-            if ( (s_TexMSequence != 2) ||
-                 ( (s_LastInst != D3DSIO_TEXM3x3PAD) &&
-                   (s_LastInst != D3DSIO_TEXM3x3DIFF) ) ) goto _TexMSeqInvalid;
             s_TexMSequence = 0;
             break;
         default:
@@ -1623,7 +1900,7 @@ BOOL CPShaderValidator::Rule_ValidTEXM3xSequence()
         }
         goto _TexMSeqOK;
 _TexMSeqInvalid:
-        Spew( SPEW_INSTRUCTION_ERROR, m_pCurrInst, "Invalid TEXM* sequence." );
+        Spew( SPEW_INSTRUCTION_ERROR, m_pCurrInst, "Invalid texm* sequence." );
         m_ErrorCount++;
     }
 _TexMSeqOK:
@@ -1633,27 +1910,25 @@ _TexMSeqOK:
 }
 
 //-----------------------------------------------------------------------------
-// CPShaderValidator::Rule_ValidTEXM3xRegisterNumbers
+// CPShaderValidator10::Rule_ValidTEXM3xRegisterNumbers
 //
 // ** Rule:
 // If instruction is a TEXM3x*, register numbers must be as follows:
 //
-//      1) texm3x2pad / texdepth        t(x), t(y1)
-//      2) texm3x2tex                   t(x+1), t(y2)
+//      1) texm3x2pad / texm3x2depth    t(x), t(y)
+//      2) texm3x2tex                   t(x+1), t(y)
 //
-//      1) texm3x3pad                   t(x), t(y1)
-//      2) texm3x3pad                   t(x+1), t(y2)
-//      3) texm3x3tex                   t(x+2), t(y3)
+//      1) texm3x3pad                   t(x), t(y)
+//      2) texm3x3pad                   t(x+1), t(y)
+//      3) texm3x3tex/texm3x3           t(x+2), t(y)
 //
-//      1) texm3x3pad                   t(x), t(y1)
-//      2) texm3x3pad / texm3x3diff     t(x+1), t(y2)
-//      3) texm3x3spec                  t(x+2), t(y3), c#
+//      1) texm3x3pad                   t(x), t(y)
+//      2) texm3x3pad                   t(x+1), t(y)
+//      3) texm3x3spec                  t(x+2), t(y), c#
 //
-//      1) texm3x3pad                   t(x), t(y1)
-//      2) texm3x3pad / texm3x3diff     t(x+1), t(y2)
-//      3) texm3x3vspec                 t(x+2), t(y3)
-//
-//      where y1, y2, and y3 are all less than x
+//      1) texm3x3pad                   t(x), t(y)
+//      2) texm3x3pad                   t(x+1), t(y)
+//      3) texm3x3vspec                 t(x+2), t(y)
 //
 // ** When to call:
 // Per instruction.
@@ -1662,23 +1937,27 @@ _TexMSeqOK:
 // Always TRUE.
 //
 //-----------------------------------------------------------------------------
-BOOL CPShaderValidator::Rule_ValidTEXM3xRegisterNumbers()
+BOOL CPShaderValidator10::Rule_ValidTEXM3xRegisterNumbers()
 {
     #define PREV_INST_TYPE(_INST) \
                 ((_INST && _INST->m_pPrevInst) ? _INST->m_pPrevInst->m_Type : D3DSIO_NOP)
 
+    #define PREV_INST_SRC0_REGNUM(_INST) \
+                ((_INST && _INST->m_pPrevInst) ? _INST->m_pPrevInst->m_SrcParam[0].m_RegNum : -1)
+
     if( _CURR_PS_INST->m_bTexMOp )
     {
-        DWORD DstParamR = m_pCurrInst->m_DstParam[0].m_RegNum;
+        DWORD DstParamR = m_pCurrInst->m_DstParam.m_RegNum;
         DWORD SrcParam0R = m_pCurrInst->m_SrcParam[0].m_RegNum;
         switch (m_pCurrInst->m_Type)
         {
         case D3DSIO_TEXM3x2PAD:
             break;
         case D3DSIO_TEXM3x2TEX:
+        case D3DSIO_TEXM3x2DEPTH:
             if ( DstParamR != (m_TexMBaseDstReg + 1) )
                 goto _TexMRegInvalid;
-            if( SrcParam0R >= m_TexMBaseDstReg )
+            if( SrcParam0R != PREV_INST_SRC0_REGNUM(m_pCurrInst) )
                 goto _TexMRegInvalid;
             break;
         case D3DSIO_TEXM3x3PAD:
@@ -1688,26 +1967,21 @@ BOOL CPShaderValidator::Rule_ValidTEXM3xRegisterNumbers()
                     goto _TexMRegInvalid;
 
             if ( D3DSIO_TEXM3x3PAD == PREV_INST_TYPE(m_pCurrInst) &&
-                 (SrcParam0R >= m_TexMBaseDstReg ))
+                 (SrcParam0R != PREV_INST_SRC0_REGNUM(m_pCurrInst)) )
                     goto _TexMRegInvalid;
             break;
         }
-        case D3DSIO_TEXM3x3DIFF:
-            if ( DstParamR != (m_TexMBaseDstReg + 1) )
-                goto _TexMRegInvalid;
-            if( SrcParam0R >= m_TexMBaseDstReg )
-                    goto _TexMRegInvalid;
-            break;
         case D3DSIO_TEXM3x3SPEC:
             // SPEC requires second src param to be from const regs
             if ( m_pCurrInst->m_SrcParam[1].m_RegType != D3DSPR_CONST )
                 goto _TexMRegInvalid;
             // fall through
+        case D3DSIO_TEXM3x3:
         case D3DSIO_TEXM3x3TEX:
         case D3DSIO_TEXM3x3VSPEC:
             if ( DstParamR != (m_TexMBaseDstReg + 2) )
                 goto _TexMRegInvalid;
-            if( SrcParam0R >= m_TexMBaseDstReg )
+            if( SrcParam0R != PREV_INST_SRC0_REGNUM(m_pCurrInst) )
                     goto _TexMRegInvalid;
             break;
         default:
@@ -1715,7 +1989,7 @@ BOOL CPShaderValidator::Rule_ValidTEXM3xRegisterNumbers()
         }
         goto _TexMRegOK;
 _TexMRegInvalid:
-        Spew( SPEW_INSTRUCTION_ERROR, m_pCurrInst, "Invalid TEXM* register." );
+        Spew( SPEW_INSTRUCTION_ERROR, m_pCurrInst, "Invalid texm* register." );
         m_ErrorCount++;
     }
 _TexMRegOK:
@@ -1723,14 +1997,11 @@ _TexMRegOK:
 }
 
 //-----------------------------------------------------------------------------
-// CPShaderValidator::Rule_ValidCNDInstruction
+// CPShaderValidator10::Rule_ValidCNDInstruction
 //
 // ** Rule:
 // First source for cnd instruction must be 'r0.a' (exactly).
 // i.e. cnd r1, r0.a, t0, t1
-//
-// For v255.255, first source can be any register type/number, and
-//               .a and no-swizzle are allowed.
 //
 // ** When to call:
 // Per instruction.
@@ -1739,53 +2010,74 @@ _TexMRegOK:
 // Always TRUE.
 //
 //-----------------------------------------------------------------------------
-BOOL CPShaderValidator::Rule_ValidCNDInstruction()
+BOOL CPShaderValidator10::Rule_ValidCNDInstruction()
 {
     if( D3DSIO_CND == m_pCurrInst->m_Type )
     {
         SRCPARAM Src0 = m_pCurrInst->m_SrcParam[0];
-        if( D3DPS_VERSION(255,255) == m_Version )
+        if( Src0.m_bParamUsed &&
+            D3DSPR_TEMP == Src0.m_RegType &&
+            0 == Src0.m_RegNum &&
+            D3DSP_REPLICATEALPHA == Src0.m_SwizzleShift &&
+            D3DSPSM_NONE == Src0.m_SrcMod )
         {
-            if( Src0.m_bParamUsed &&
-                D3DSPSM_NONE == Src0.m_SrcMod &&
-                ( (D3DSP_REPLICATEALPHA == Src0.m_SwizzleShift) ||
-                  (D3DSP_NOSWIZZLE == Src0.m_SwizzleShift)
-                )
-              )
-            {
-                return TRUE;    // Src 0 register has no modifiers and swizzle is either .a or .rgba
-            }
-
-            Spew( SPEW_INSTRUCTION_ERROR, m_pCurrInst, "First source register for CND instruction must be 'r0.a' or 'r0.rgba'/'r0'(no-swizzle)." );
-            m_ErrorCount++;
+            return TRUE;    // Src 0 is r0.a
         }
-        else
-        {
-            if( Src0.m_bParamUsed &&
-                D3DSPR_TEMP == Src0.m_RegType &&
-                0 == Src0.m_RegNum &&
-                D3DSP_REPLICATEALPHA == Src0.m_SwizzleShift &&
-                D3DSPSM_NONE == Src0.m_SrcMod )
-            {
-                return TRUE;    // Src 0 is r0.a
-            }
 
-            Spew( SPEW_INSTRUCTION_ERROR, m_pCurrInst, "First source for CND instruction must be 'r0.a'." );
-            m_ErrorCount++;
-
-        }
+        Spew( SPEW_INSTRUCTION_ERROR, m_pCurrInst, "First source for cnd instruction must be 'r0.a'." );
+        m_ErrorCount++;
     }
     return TRUE;
 }
 
 //-----------------------------------------------------------------------------
-// CPShaderValidator::Rule_ValidLRPInstruction
+// CPShaderValidator10::Rule_ValidCMPInstruction
+//
+// ** Rule:
+// There may be at most 3 cmp instructions per shader.
+// (only executed for ps.1.2)
+//
+// ** When to call:
+// Per instruction.
+//
+// ** Returns:
+// Always TRUE.
+//
+//-----------------------------------------------------------------------------
+BOOL CPShaderValidator10::Rule_ValidCMPInstruction()
+{
+    static UINT s_cCMPInstCount;
+
+    if( NULL == m_pCurrInst->m_pPrevInst ) // First instruction - initialize static vars
+    {
+        s_cCMPInstCount = 0;
+    }
+
+    if( D3DSIO_CMP == m_pCurrInst->m_Type && D3DPS_VERSION(1,3) >= m_Version)
+    {
+        s_cCMPInstCount++;
+
+        if( 3 < s_cCMPInstCount )
+        {
+            Spew( SPEW_INSTRUCTION_ERROR, m_pCurrInst, "Maximum of 3 cmp instructions allowed." );
+            m_ErrorCount++;
+        }
+
+    }
+    return TRUE;
+}
+
+//-----------------------------------------------------------------------------
+// CPShaderValidator10::Rule_ValidLRPInstruction
 //
 // ** Rule:
 // The only valid source modifier for the src0 operand for LRP is complement
 // (1-reg)
 // i.e. lrp r1, 1-r0, t0, t1
 //
+// If there was a previous writer to src0, then it must have applied
+// the _sat destination modifier.
+//
 // ** When to call:
 // Per instruction.
 //
@@ -1793,7 +2085,7 @@ BOOL CPShaderValidator::Rule_ValidCNDInstruction()
 // Always TRUE.
 //
 //-----------------------------------------------------------------------------
-BOOL CPShaderValidator::Rule_ValidLRPInstruction()
+BOOL CPShaderValidator10::Rule_ValidLRPInstruction()
 {
     if( D3DSIO_LRP == m_pCurrInst->m_Type )
     {
@@ -1807,15 +2099,72 @@ BOOL CPShaderValidator::Rule_ValidLRPInstruction()
         case D3DSPSM_COMP:
             break;
         default:
-            Spew( SPEW_INSTRUCTION_ERROR, m_pCurrInst, "The only valid modifiers for the first source parameter of LRP are: reg (no mod) or 1-reg (complement)." );
+            Spew( SPEW_INSTRUCTION_ERROR, m_pCurrInst, "The only valid modifiers for the first source parameter of lrp are: reg (no mod) or 1-reg (complement)." );
             m_ErrorCount++;
         }
+#ifdef SHOW_VALIDATION_WARNINGS
+        UINT RegNum = Src0.m_RegNum;
+        DWORD AffectedComponents = 0;
+
+        if( m_bSrcParamError[0] )
+            return TRUE;
+
+        for( UINT Component = 0; Component < 4; Component++ )
+        {
+            if( !(COMPONENT_MASKS[Component] & Src0.m_ComponentReadMask) )
+                continue;
+
+            CAccessHistoryNode* pMostRecentWriter = NULL;
+            switch( Src0.m_RegType )
+            {
+            case D3DSPR_TEXTURE:
+                pMostRecentWriter = m_pTextureRegFile->m_pAccessHistory[Component][RegNum].m_pMostRecentWriter;
+                break;
+            case D3DSPR_INPUT:
+                pMostRecentWriter = m_pInputRegFile->m_pAccessHistory[Component][RegNum].m_pMostRecentWriter;
+                break;
+            case D3DSPR_TEMP:
+                pMostRecentWriter = m_pTempRegFile->m_pAccessHistory[Component][RegNum].m_pMostRecentWriter;
+                break;
+            case D3DSPR_CONST:
+                pMostRecentWriter = m_pConstRegFile->m_pAccessHistory[Component][RegNum].m_pMostRecentWriter;
+                break;
+            }
+
+            // The previous writer may be the current instruction.
+            // If so, go back one step (the previous writer before the current instruction).
+            if( pMostRecentWriter && pMostRecentWriter->m_pInst &&
+                pMostRecentWriter->m_pInst == m_pCurrInst )
+            {
+                pMostRecentWriter = pMostRecentWriter->m_pPreviousWriter;
+            }
+
+            if( pMostRecentWriter &&
+                pMostRecentWriter->m_pInst &&
+                !((CPSInstruction*)pMostRecentWriter->m_pInst)->m_bTexOp &&
+                (D3DSPDM_SATURATE != pMostRecentWriter->m_pInst->m_DstParam.m_DstMod )
+              )
+            {
+                AffectedComponents |= COMPONENT_MASKS[Component];
+            }
+        }
+        if( AffectedComponents )
+        {
+            // A warning.
+            Spew( SPEW_INSTRUCTION_WARNING, m_pCurrInst,
+                "Previous writer to the first source register of lrp instruction "
+                "should apply the saturate destination modifier.  This ensures consistent "
+                "behaviour across different hardware. "
+                "Affected components(*) of first source register: %s",
+                MakeAffectedComponentsText(AffectedComponents,TRUE,FALSE));
+        }
+#endif // SHOW_VALIDATION_WARNINGS
     }
     return TRUE;
 }
 
 //-----------------------------------------------------------------------------
-// CPShaderValidator::Rule_ValidDEFInstruction
+// CPShaderValidator10::Rule_ValidDEFInstruction
 //
 // ** Rule:
 // For the DEF instruction, make sure the dest parameter is a valid constant,
@@ -1832,7 +2181,7 @@ BOOL CPShaderValidator::Rule_ValidLRPInstruction()
 // Always TRUE.
 //
 //-----------------------------------------------------------------------------
-BOOL CPShaderValidator::Rule_ValidDEFInstruction()
+BOOL CPShaderValidator10::Rule_ValidDEFInstruction()
 {
 
     static BOOL s_bDEFInstructionAllowed;
@@ -1851,17 +2200,17 @@ BOOL CPShaderValidator::Rule_ValidDEFInstruction()
     {
         if( !s_bDEFInstructionAllowed )
         {
-            Spew( SPEW_INSTRUCTION_ERROR, m_pCurrInst, "Const declaration (DEF) must appear before other instructions." );
+            Spew( SPEW_INSTRUCTION_ERROR, m_pCurrInst, "Const declaration (def) must appear before other instructions." );
             m_ErrorCount++;
         }
-        DSTPARAM* pDstParam = &m_pCurrInst->m_DstParam[0];
+        DSTPARAM* pDstParam = &m_pCurrInst->m_DstParam;
         if( D3DSP_WRITEMASK_ALL != pDstParam->m_WriteMask ||
             D3DSPDM_NONE != pDstParam->m_DstMod ||
             DSTSHIFT_NONE != pDstParam->m_DstShift ||
             D3DSPR_CONST != pDstParam->m_RegType
             )
         {
-            Spew( SPEW_INSTRUCTION_ERROR, m_pCurrInst, "Destination for DEF instruction must be of the form c# (# = reg number, no modifiers)." );
+            Spew( SPEW_INSTRUCTION_ERROR, m_pCurrInst, "Destination for def instruction must be of the form c# (# = reg number, no modifiers)." );
             m_ErrorCount++;
         }
 
@@ -1879,10 +2228,11 @@ BOOL CPShaderValidator::Rule_ValidDEFInstruction()
 }
 
 //-----------------------------------------------------------------------------
-// CPShaderValidator::Rule_ValidDP3Instruction
+// CPShaderValidator10::Rule_ValidDP3Instruction
 //
 // ** Rule:
 // The .a result write mask is not valid for the DP3 instruction.
+// (version <= 1.2)
 //
 // ** When to call:
 // Per instruction.
@@ -1891,14 +2241,15 @@ BOOL CPShaderValidator::Rule_ValidDEFInstruction()
 // Always TRUE.
 //
 //-----------------------------------------------------------------------------
-BOOL CPShaderValidator::Rule_ValidDP3Instruction()
+BOOL CPShaderValidator10::Rule_ValidDP3Instruction()
 {
-    if( D3DSIO_DP3 == m_pCurrInst->m_Type )
+    if( D3DSIO_DP3 == m_pCurrInst->m_Type &&
+        D3DPS_VERSION(1,3) >= m_Version )
     {
-        if( (D3DSP_WRITEMASK_ALL != m_pCurrInst->m_DstParam[0].m_WriteMask)
-            && ((D3DSP_WRITEMASK_0 | D3DSP_WRITEMASK_1 | D3DSP_WRITEMASK_2) != m_pCurrInst->m_DstParam[0].m_WriteMask ) )
+        if( (D3DSP_WRITEMASK_ALL != m_pCurrInst->m_DstParam.m_WriteMask)
+            && ((D3DSP_WRITEMASK_0 | D3DSP_WRITEMASK_1 | D3DSP_WRITEMASK_2) != m_pCurrInst->m_DstParam.m_WriteMask ) )
         {
-            Spew( SPEW_INSTRUCTION_ERROR, m_pCurrInst, "Dest write mask must be .rgb, or .rgba (all) for DP3." );
+            Spew( SPEW_INSTRUCTION_ERROR, m_pCurrInst, "Dest write mask must be .rgb, or .rgba (all) for dp3." );
             m_ErrorCount++;
         }
     }
@@ -1907,7 +2258,44 @@ BOOL CPShaderValidator::Rule_ValidDP3Instruction()
 }
 
 //-----------------------------------------------------------------------------
-// CPShaderValidator::Rule_ValidInstructionPairing
+// CPShaderValidator10::Rule_ValidDP4Instruction
+//
+// ** Rule:
+// There may be at most 4 DP4 instructions per shader.
+// (only executed for ps.1.2)
+//
+// ** When to call:
+// Per instruction.
+//
+// ** Returns:
+// Always TRUE.
+//
+//-----------------------------------------------------------------------------
+BOOL CPShaderValidator10::Rule_ValidDP4Instruction()
+{
+    static UINT s_cDP4InstCount;
+
+    if( NULL == m_pCurrInst->m_pPrevInst ) // First instruction - initialize static vars
+    {
+        s_cDP4InstCount = 0;
+    }
+
+    if( D3DSIO_DP4 == m_pCurrInst->m_Type && D3DPS_VERSION(1,3) >= m_Version )
+    {
+        s_cDP4InstCount++;
+
+        if( 4 < s_cDP4InstCount )
+        {
+            Spew( SPEW_INSTRUCTION_ERROR, m_pCurrInst, "Maximum of 4 dp4 instructions allowed." );
+            m_ErrorCount++;
+        }
+    }
+    return TRUE;
+}
+
+
+//-----------------------------------------------------------------------------
+// CPShaderValidator10::Rule_ValidInstructionPairing
 //
 // ** Rule:
 // - If an instruction is co-issued with another instruction,
@@ -1922,6 +2310,8 @@ BOOL CPShaderValidator::Rule_ValidDP3Instruction()
 // - The first color blend instruction cannot have "+" (D3DSI_COISSUE) set either.
 //
 // - NOP may not be used in a co-issue pair.
+//
+// - DP4 may not be used in a co-issue pair.
 //
 // - DP3 (dot product) always uses the color/vector pipeline (even if it is not writing
 // to color components). Thus:
@@ -1959,7 +2349,7 @@ BOOL CPShaderValidator::Rule_ValidDP3Instruction()
 // Always TRUE.
 //
 //-----------------------------------------------------------------------------
-BOOL CPShaderValidator::Rule_ValidInstructionPairing()
+BOOL CPShaderValidator10::Rule_ValidInstructionPairing()
 {
     static BOOL s_bSeenNonTexOp;
 
@@ -1974,7 +2364,7 @@ BOOL CPShaderValidator::Rule_ValidInstructionPairing()
         if( _CURR_PS_INST->m_bCoIssue )
         {
             Spew( SPEW_INSTRUCTION_ERROR, m_pCurrInst,
-                "First pixel blend instruction cannot have co-issue ('+') set; there is no previous pixel blend instruction to pair with.");
+                "First arithmetic instruction cannot have co-issue ('+') set; there is no previous arithmetic instruction to pair with.");
             m_ErrorCount++;
         }
         s_bSeenNonTexOp = TRUE;
@@ -1983,7 +2373,7 @@ BOOL CPShaderValidator::Rule_ValidInstructionPairing()
     if( _CURR_PS_INST->m_bTexOp && _CURR_PS_INST->m_bCoIssue )
     {
         Spew( SPEW_INSTRUCTION_ERROR, m_pCurrInst,
-                "Cannot set co-issue ('+') on a texture instruction.  Co-issue only applies to pixel blend instructions." );
+                "Cannot set co-issue ('+') on a texture instruction.  Co-issue only applies to arithmetic instructions." );
         m_ErrorCount++;
     }
 
@@ -1999,14 +2389,29 @@ BOOL CPShaderValidator::Rule_ValidInstructionPairing()
         (D3DSIO_NOP == m_pCurrInst->m_pPrevInst->m_Type))
     {
         // NOP cannot be part of co-issue (previous instruction found to be NOP)
-        Spew( SPEW_INSTRUCTION_ERROR, m_pCurrInst->m_pPrevInst, "Nop instruction cannot be co-issued." );
+        Spew( SPEW_INSTRUCTION_ERROR, m_pCurrInst->m_pPrevInst, "nop instruction cannot be co-issued." );
         m_ErrorCount++;
     }
 
     if( _CURR_PS_INST->m_bCoIssue && D3DSIO_NOP == m_pCurrInst->m_Type )
     {
         // NOP cannot be part of co-issue (current instruction found to be NOP)
-        Spew( SPEW_INSTRUCTION_ERROR, m_pCurrInst, "Nop instruction cannot be co-issued." );
+        Spew( SPEW_INSTRUCTION_ERROR, m_pCurrInst, "nop instruction cannot be co-issued." );
+        m_ErrorCount++;
+    }
+
+    if( _CURR_PS_INST->m_bCoIssue && m_pCurrInst->m_pPrevInst &&
+        (D3DSIO_DP4 == m_pCurrInst->m_pPrevInst->m_Type))
+    {
+        // DP4 cannot be part of co-issue (previous instruction found to be DP4)
+        Spew( SPEW_INSTRUCTION_ERROR, m_pCurrInst->m_pPrevInst, "dp4 instruction cannot be co-issued." );
+        m_ErrorCount++;
+    }
+
+    if( _CURR_PS_INST->m_bCoIssue && D3DSIO_DP4 == m_pCurrInst->m_Type )
+    {
+        // DP4 cannot be part of co-issue (current instruction found to be DP4)
+        Spew( SPEW_INSTRUCTION_ERROR, m_pCurrInst, "dp4 instruction cannot be co-issued." );
         m_ErrorCount++;
     }
 
@@ -2020,10 +2425,10 @@ BOOL CPShaderValidator::Rule_ValidInstructionPairing()
         DWORD CurrInstWriteMask = 0;
         DWORD PrevInstWriteMask = 0;
 
-        if( m_pCurrInst->m_DstParam[0].m_bParamUsed )
-            CurrInstWriteMask = m_pCurrInst->m_DstParam[0].m_WriteMask;
-        if( m_pCurrInst->m_pPrevInst->m_DstParam[0].m_bParamUsed )
-            PrevInstWriteMask = m_pCurrInst->m_pPrevInst->m_DstParam[0].m_WriteMask;
+        if( m_pCurrInst->m_DstParam.m_bParamUsed )
+            CurrInstWriteMask = m_pCurrInst->m_DstParam.m_WriteMask;
+        if( m_pCurrInst->m_pPrevInst->m_DstParam.m_bParamUsed )
+            PrevInstWriteMask = m_pCurrInst->m_pPrevInst->m_DstParam.m_WriteMask;
 
         if( D3DSIO_DP3 == m_pCurrInst->m_Type &&
             D3DSIO_DP3 == m_pCurrInst->m_pPrevInst->m_Type )
@@ -2076,13 +2481,13 @@ BOOL CPShaderValidator::Rule_ValidInstructionPairing()
                                     "Co-issued instruction cannot write all components - must write either alpha or color." );
                 m_ErrorCount++;
             }
-            if( (m_pCurrInst->m_DstParam[0].m_RegType == m_pCurrInst->m_pPrevInst->m_DstParam[0].m_RegType) &&
-                (m_pCurrInst->m_DstParam[0].m_RegNum == m_pCurrInst->m_pPrevInst->m_DstParam[0].m_RegNum) &&
+            if( (m_pCurrInst->m_DstParam.m_RegType == m_pCurrInst->m_pPrevInst->m_DstParam.m_RegType) &&
+                (m_pCurrInst->m_DstParam.m_RegNum == m_pCurrInst->m_pPrevInst->m_DstParam.m_RegNum) &&
                 ((CurrInstWriteMask & PrevInstWriteMask) != 0) )
             {
                 Spew( SPEW_INSTRUCTION_ERROR, m_pCurrInst,
                     "Co-issued instructions cannot both write to the same components of a register.  Affected components: %s",
-                    MakeAffectedComponentsText(CurrInstWriteMask & PrevInstWriteMask)
+                    MakeAffectedComponentsText(CurrInstWriteMask & PrevInstWriteMask,TRUE,FALSE)
                     );
                 m_ErrorCount++;
             }
@@ -2098,15 +2503,15 @@ BOOL CPShaderValidator::Rule_ValidInstructionPairing()
             }
         }
 
-        if( m_Version <= D3DPS_VERSION(1,0) )
+        if( D3DPS_VERSION(1,0) >= m_Version )
         {
             // both co-issued instructions must write to the same register number.
-            if( m_pCurrInst->m_DstParam[0].m_RegType != m_pCurrInst->m_pPrevInst->m_DstParam[0].m_RegType )
+            if( m_pCurrInst->m_DstParam.m_RegType != m_pCurrInst->m_pPrevInst->m_DstParam.m_RegType )
             {
                 Spew( SPEW_INSTRUCTION_ERROR, m_pCurrInst, "Co-issued instructions must both write to the same register type for pixelshader version <= 1.0." );
                 m_ErrorCount++;
             }
-            if( (m_pCurrInst->m_DstParam[0].m_RegNum != m_pCurrInst->m_pPrevInst->m_DstParam[0].m_RegNum) )
+            if( (m_pCurrInst->m_DstParam.m_RegNum != m_pCurrInst->m_pPrevInst->m_DstParam.m_RegNum) )
             {
                 Spew( SPEW_INSTRUCTION_ERROR, m_pCurrInst, "Co-issued instructions must both write to the same register number for pixelshader version <= 1.0." );
                 m_ErrorCount++;
@@ -2117,7 +2522,7 @@ BOOL CPShaderValidator::Rule_ValidInstructionPairing()
 }
 
 //-----------------------------------------------------------------------------
-// CPShaderValidator::Rule_ValidInstructionCount
+// CPShaderValidator10::Rule_ValidInstructionCount
 //
 // ** Rule:
 // Make sure instruction count for pixel shader version has not been exceeded.
@@ -2136,8 +2541,6 @@ BOOL CPShaderValidator::Rule_ValidInstructionPairing()
 // The def instruction, nop, and comments (already stripped), do not count
 // toward any limits.
 //
-// This rule does not enforce anything in the case of a legacy pixel shader.
-//
 // ** When to call:
 // Per instruction AND after all instructions seen.
 //
@@ -2145,49 +2548,37 @@ BOOL CPShaderValidator::Rule_ValidInstructionPairing()
 // Always TRUE.
 //
 //-----------------------------------------------------------------------------
-BOOL CPShaderValidator::Rule_ValidInstructionCount()
+BOOL CPShaderValidator10::Rule_ValidInstructionCount()
 {
     static UINT s_MaxTexOpCount;
     static UINT s_MaxBlendOpCount;
     static UINT s_MaxTotalOpCount;
-    static BOOL s_bRuleDisabled;
 
     if( NULL == m_pCurrInst )
         return TRUE;
 
-    if(( NULL == m_pCurrInst->m_pPrevInst ) &&
-       ( FALSE == m_bSeenAllInstructions ))    // First instruction - initialize static vars
+    if( NULL == m_pCurrInst->m_pPrevInst )   // First instruction - initialize static vars
     {
         m_TexOpCount = 0;
         m_BlendOpCount = 0;
-        s_bRuleDisabled = FALSE;
 
         switch(m_Version)
         {
-        case D3DPS_VERSION(0x254,0x254):  // Legacy shader
-            s_bRuleDisabled = TRUE;
-            break;
-        case D3DPS_VERSION(1,0):    // DX7.5
+        case D3DPS_VERSION(1,0):    // DX8.0
             s_MaxTexOpCount   = 4;
             s_MaxBlendOpCount = 8;
             s_MaxTotalOpCount = 8;
             break;
         default:
         case D3DPS_VERSION(1,1):    // DX8.0
+        case D3DPS_VERSION(1,2):    // DX8.1
+        case D3DPS_VERSION(1,3):    // DX8.1
             s_MaxTexOpCount   = 4;
             s_MaxBlendOpCount = 8;
             s_MaxTotalOpCount = 12;
             break;
-        case D3DPS_VERSION(255,255):
-            s_MaxTexOpCount   = 16;
-            s_MaxBlendOpCount = 32;
-            s_MaxTotalOpCount = 48;
-            break;
         }
     }
-
-    if( s_bRuleDisabled )
-        return TRUE;
 
     if( m_bSeenAllInstructions )
     {
@@ -2199,20 +2590,15 @@ BOOL CPShaderValidator::Rule_ValidInstructionCount()
         }
         if( m_BlendOpCount > s_MaxBlendOpCount )
         {
-            Spew( SPEW_GLOBAL_ERROR, NULL, "Too many pixel blending instruction slots used: %d. Max. allowed (counting any co-issued instructions as 1) is %d.",
+            Spew( SPEW_GLOBAL_ERROR, NULL, "Too many arithmetic instruction slots used: %d. Max. allowed (counting any co-issued pairs as 1) is %d.",
                   m_BlendOpCount, s_MaxBlendOpCount);
             m_ErrorCount++;
         }
         if( !(m_TexOpCount > s_MaxTexOpCount && m_BlendOpCount > s_MaxBlendOpCount) // not already spewed avove 2 errors
             && (m_TotalOpCount > s_MaxTotalOpCount) )
         {
-            Spew( SPEW_GLOBAL_ERROR, NULL, "Total number of instruction slots used too high: %d. Max. allowed (counting any co-issued instructions as 1) is %d.",
+            Spew( SPEW_GLOBAL_ERROR, NULL, "Total number of instruction slots used too high: %d. Max. allowed (counting any co-issued pairs as 1) is %d.",
                   m_TotalOpCount, s_MaxTotalOpCount);
-            m_ErrorCount++;
-        }
-        if(m_BlendOpCount == 0)
-        {
-            Spew( SPEW_GLOBAL_ERROR, NULL, "At least one pixel blending instruction must be used in addition to XFC.");
             m_ErrorCount++;
         }
         return TRUE;
@@ -2221,21 +2607,41 @@ BOOL CPShaderValidator::Rule_ValidInstructionCount()
     switch(m_pCurrInst->m_Type)
     {
     case D3DSIO_TEXBEML:
+        m_BlendOpCount += 1;
+        m_TotalOpCount += 1;
+        // falling through
     case D3DSIO_TEXBEM:
+        if(D3DPS_VERSION(1,0) >= m_Version )
+        {
+            m_TexOpCount += 2;
+            m_TotalOpCount += 2;
+        }
+        else
+        {
+            m_TexOpCount += 1;
+            m_TotalOpCount += 1;
+        }
+        break;
     case D3DSIO_TEX:
-    case D3DSIO_TEXBEM_LEGACY:
-    case D3DSIO_TEXBEML_LEGACY:
+        m_TexOpCount++;
+        if(D3DPS_VERSION(1,1) <= m_Version)
+            m_TotalOpCount += 1;
+        break;
     case D3DSIO_TEXCOORD:
     case D3DSIO_TEXM3x2PAD:
     case D3DSIO_TEXM3x2TEX:
     case D3DSIO_TEXM3x3PAD:
     case D3DSIO_TEXM3x3TEX:
-    case D3DSIO_TEXM3x3DIFF:
     case D3DSIO_TEXM3x3SPEC:
     case D3DSIO_TEXM3x3VSPEC:
     case D3DSIO_TEXREG2AR:
     case D3DSIO_TEXREG2GB:
     case D3DSIO_TEXKILL:
+    case D3DSIO_TEXM3x2DEPTH:
+    case D3DSIO_TEXDP3:
+    case D3DSIO_TEXREG2RGB:
+    case D3DSIO_TEXDP3TEX:
+    case D3DSIO_TEXM3x3:
         m_TexOpCount++;
         m_TotalOpCount++;
         break;
@@ -2246,8 +2652,8 @@ BOOL CPShaderValidator::Rule_ValidInstructionCount()
     case D3DSIO_MAD:
     case D3DSIO_LRP:
     case D3DSIO_DP3:
+    case D3DSIO_CMP:
     case D3DSIO_CND:
-    case D3DSIO_END:
     case D3DSIO_DP4:
         if( !_CURR_PS_INST->m_bCoIssue )
         {
@@ -2256,6 +2662,7 @@ BOOL CPShaderValidator::Rule_ValidInstructionCount()
         }
         break;
     case D3DSIO_NOP:
+    case D3DSIO_END:
     case D3DSIO_DEF:
         break;
     default:
@@ -2266,7 +2673,7 @@ BOOL CPShaderValidator::Rule_ValidInstructionCount()
 }
 
 //-----------------------------------------------------------------------------
-// CPShaderValidator::Rule_R0Written
+// CPShaderValidator10::Rule_R0Written
 //
 // ** Rule:
 // All components (r,g,b,a) of register R0 must have been written by the
@@ -2279,15 +2686,14 @@ BOOL CPShaderValidator::Rule_ValidInstructionCount()
 // Always TRUE.
 //
 //-----------------------------------------------------------------------------
-BOOL CPShaderValidator::Rule_R0Written()
+BOOL CPShaderValidator10::Rule_R0Written()
 {
     UINT  NumUninitializedComponents    = 0;
     DWORD UninitializedComponentsMask   = 0;
 
     for( UINT i = 0; i < NUM_COMPONENTS_IN_REGISTER; i++ )
     {
-        if( (NULL == m_pTempRegFile->m_pAccessHistory[i][0].m_pMostRecentWriter ) &&
-            (!m_pTempRegFile->m_pAccessHistory[i][0].m_bPreShaderInitialized) )
+        if( NULL == m_pTempRegFile->m_pAccessHistory[i][0].m_pMostRecentWriter )
         {
             NumUninitializedComponents++;
             UninitializedComponentsMask |= COMPONENT_MASKS[i];

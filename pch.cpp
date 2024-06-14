@@ -64,6 +64,8 @@ typedef struct { char x[16]; } GUID;
 #define DXGASSERT assert
 #define DXGRIP printf
 
+#include <new>
+
 #include "errlog.hpp"
 #include "valbase.hpp"
 #include "vshdrval.hpp"

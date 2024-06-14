@@ -1285,7 +1285,11 @@ BOOL CPShaderValidator14::Rule_ValidDstParam() // could break this down for more
                     if( pRegFile->m_pAccessHistory[2][RegNum].m_pMostRecentWriter )
                     {
                         m_pTempRegFile->m_pAccessHistory[2][RegNum].~CAccessHistory();
+#ifdef __clang__
+                        new (&m_pTempRegFile->m_pAccessHistory[2][RegNum]) CAccessHistory();
+#else
                         m_pTempRegFile->m_pAccessHistory[2][RegNum].CAccessHistory::CAccessHistory();
+#endif
                         m_TempRegsWithZappedBlue |= 1 << RegNum;
                     }
                 }
@@ -1711,7 +1715,11 @@ BOOL CPShaderValidator14::Rule_ValidMarker()
         if( m_pTempRegFile->m_pAccessHistory[3][i].m_pMostRecentWriter )
         {
             m_pTempRegFile->m_pAccessHistory[3][i].~CAccessHistory();
+#ifdef __clang__
+            new (&m_pTempRegFile->m_pAccessHistory[3][i]) CAccessHistory();
+#else
             m_pTempRegFile->m_pAccessHistory[3][i].CAccessHistory::CAccessHistory();
+#endif
             m_TempRegsWithZappedAlpha |= 1 << i;
         }
     }

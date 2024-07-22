@@ -35,7 +35,6 @@
 #define SUCCEEDED(x) (x == S_OK)
 #define WINAPI
 #define HeapAlloc(a,b,c) malloc(c)
-#define OutputDebugString printf
 #define lstrlen strlen
 #define _snprintf snprintf
 #define _vsnprintf vsnprintf
@@ -47,12 +46,14 @@ typedef uint8_t BYTE;
 typedef uint16_t WORD;
 typedef uint32_t DWORD;
 typedef uint32_t UINT;
-typedef char const* LPCSTR;
 typedef void* HWND;
 typedef struct { char x[16]; } GUID;
 #endif
 #include "d3d8types.h"
 #include "d3d8caps.h"
+
+extern "C" void ShaderOutputDebugString(char const*);
+#define OutputDebugString ShaderOutputDebugString
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -61,7 +62,7 @@ typedef struct { char x[16]; } GUID;
 
 #include <assert.h>
 #define DXGASSERT assert
-#define DXGRIP printf
+#define _ASSERT(a,b) (void(0))
 
 #include <new>
 
@@ -69,6 +70,8 @@ typedef struct { char x[16]; } GUID;
 #include "valbase.hpp"
 #include "vshdrval.hpp"
 #include "pshdrval.hpp"
+#include "vshader.h"
+#include "pshader.h"
 
 ///////////////////////////////////////////////////////////////////////////////
 // end
